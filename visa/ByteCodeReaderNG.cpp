@@ -948,7 +948,6 @@ static void readInstructionDataportNG(unsigned& bytePos, const char* buf, ISA_Op
             cntrls.isCoarseMode  = (mode & (0x1 << 10))? true:false;
             cntrls.isSampleIndex = (mode & (0x1 << 11)) ? true : false;
             cntrls.RTIndexPresent = (mode & (0x1 << 2)) ? true : false;
-            cntrls.isNullRT = (mode & (0x1 << 12)) ? true : false;
             cntrls.isHeaderMaskfromCe0 = 0;
 
             VISA_VectorOpnd *sampleIndex = cntrls.isSampleIndex ? readVectorOperandNG(bytePos, buf, container, false) : NULL;
@@ -2202,7 +2201,7 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         var_info_t* var = &header.variables[declID];
         VISA_GenVar* decl = NULL;
         VISA_Type  varType  = (VISA_Type)  ((var->bit_properties     ) & 0xF);
-        VISA_Align varAlign = (VISA_Align) ((var->bit_properties >> 4) & 0xF);
+        VISA_Align varAlign = (VISA_Align) ((var->bit_properties >> 4) & 0x7);
         uint8_t aliasScopeSpecifier = header.variables[declID].alias_scope_specifier;
         int status = VISA_SUCCESS;
 

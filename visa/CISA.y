@@ -258,9 +258,7 @@ VISA_RawOpnd* rawOperandArray[16];
     bool                   cps;
     bool                   non_uniform_sampler;
     bool                   flag;
-
-    CISA_GEN_VAR*          vISADecl;
-} // end of possible token types
+}
 
 %start CISAStmt
 
@@ -358,7 +356,7 @@ VISA_RawOpnd* rawOperandArray[16];
 %token <string> RTWRITE_OPTION
 
 %token <string>            STRING_LITERAL
-%token <CISA_align>        ALIGNTYPE_NONVAR_KEYWORD
+%token <CISA_align>        ALIGNTYPE_2GRF
 %token <media_mode>        MEDIA_MODE
 %token <oword_mod>         OWORD_MODIFIER
 %token <s_channel>         SAMPLER_CHANNEL
@@ -500,7 +498,6 @@ VISA_RawOpnd* rawOperandArray[16];
 %type <regAccess> AddrParam
 %type <regAccess> AddrVar
 %type <regAccess> AddressableVar
-%type <vISADecl>  PredVar
 
 %type <fp>  FloatPoint
 %type <fp>  DoubleFloat
@@ -733,8 +730,8 @@ AlignType : /* empty */
                {
                    $$ = ALIGN_BYTE;
                }
-              | ALIGN ALIGNTYPE_NONVAR_KEYWORD {
-                   $$ = $2;
+              | ALIGN ALIGNTYPE_2GRF {
+                   $$ = ALIGN_BYTE;
               }
               | ALIGN VAR /* e.g. byte, word, dword, qword, GRF, GRFx2 */
                {
@@ -861,7 +858,7 @@ LogicInstruction : Predicate BINARY_LOGIC_OP InstModifier  ExecSize VecDstOperan
          {
              pCisaBuilder->CISA_create_logic_instruction($1.cisa_gen_opnd, $2, $3, $4.emask, $4.exec_size, $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, NULL, NULL, CISAlineno);
          };
-         | Predicate BINARY_LOGIC_OP InstModifier  ExecSize PredVar PredVar PredVar
+         | Predicate BINARY_LOGIC_OP InstModifier  ExecSize VAR VAR VAR
          {
              pCisaBuilder->CISA_create_logic_instruction($2, $4.emask, $4.exec_size, $5, $6, $7, CISAlineno);
          };
@@ -879,7 +876,7 @@ UnaryLogicInstruction : Predicate UNARY_LOGIC_OP InstModifier  ExecSize VecDstOp
          {
              pCisaBuilder->CISA_create_logic_instruction($1.cisa_gen_opnd, $2, $3, $4.emask, $4.exec_size, $5.cisa_gen_opnd, $6.cisa_gen_opnd, NULL, NULL, NULL, CISAlineno);
          }
-         | Predicate UNARY_LOGIC_OP InstModifier  ExecSize PredVar PredVar
+         | Predicate UNARY_LOGIC_OP InstModifier  ExecSize VAR VAR
          {
              pCisaBuilder->CISA_create_logic_instruction($2, $4.emask, $4.exec_size, $5, $6, NULL, CISAlineno);
          };
@@ -937,7 +934,7 @@ AddrAddInstruction : ADDR_ADD_OP ExecSize VecDstOperand_A VecSrcOperand_A_G  Vec
          };
 
                 //   1       2        3                  4
-SetpInstruction : SETP_OP ExecSize   PredVar  VecSrcOperand_G_I_IMM
+SetpInstruction : SETP_OP ExecSize   VAR  VecSrcOperand_G_I_IMM
          {
              pCisaBuilder->CISA_create_setp_instruction($1, $2.emask, $2.exec_size, $3, $4.cisa_gen_opnd, CISAlineno);
          };
@@ -965,7 +962,7 @@ MovInstruction : Predicate MOV_OP InstModifier ExecSize VecDstOperand_G_I VecSrc
          {
              pCisaBuilder->CISA_create_mov_instruction($1.cisa_gen_opnd, $2, $4.emask, $4.exec_size, $3, $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
          };
-         | Predicate MOV_OP InstModifier ExecSize VecDstOperand_G_I PredVar
+         | Predicate MOV_OP InstModifier ExecSize VecDstOperand_G_I VAR
          {
              pCisaBuilder->CISA_create_mov_instruction($5.cisa_gen_opnd, $6, CISAlineno);
          };
@@ -985,9 +982,9 @@ MovsInstruction : MOVS_OP ExecSize DstStateOperand SrcStateOperand
          };
 
                  //   1          2            3        4                  5                6
-CmpInstruction :  CMP_OP ConditionalModifier ExecSize PredVar VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM
+CmpInstruction :  CMP_OP ConditionalModifier ExecSize VAR VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM
          {
-             pCisaBuilder->CISA_create_cmp_instruction($2.cisa_mod, $3.emask, $3.exec_size, $4, $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
+             pCisaBuilder->CISA_create_cmp_instruction($2.cisa_mod, ISA_CMP, $3.emask, $3.exec_size, $4, $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
          };
          //    1        2                    3        4                    5                        6
          |  CMP_OP ConditionalModifier ExecSize VecDstOperand_G_I VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM
@@ -1370,9 +1367,15 @@ Predicate :   /* empty */
             {
              $$.cisa_gen_opnd = NULL;
             }
-          | LPAREN PredState PredVar PredCntrl RPAREN
+          | LPAREN PredState VAR PredCntrl RPAREN
             {
-                $$.cisa_gen_opnd = pCisaBuilder->CISA_create_predicate_operand($3, $2.cisa_state, $4, CISAlineno);
+                char upppered[20];  //FIXME, there should be single name in the dumpling, lower/Upper changes should not be allowed.
+                int str_len = strlen($3);
+                for (int i = 0; i < str_len; i++) {
+                    upppered[i] = toupper($3[i]);
+                }
+                upppered[str_len]='\0';
+                $$.cisa_gen_opnd = pCisaBuilder->CISA_create_predicate_operand(upppered, MODIFIER_NONE, $2.cisa_state, $4, CISAlineno);
             };
 
 PredState :   /* empty */
@@ -1667,7 +1670,14 @@ DstRegion :  LANGLE NUMBER RANGLE    /* <HorzStride> */
                  $$ = $2;
              };
 
-SrcRegion : LANGLE Exp SEMI Exp COMMA Exp RANGLE   /* <VertStride;Width,HorzStride> */
+SrcRegion : /* empty */
+           {
+                $$.v_stride = 0;
+                $$.width = 0;
+                $$.h_stride = 0;
+                //$$.rgn = NULL;
+            }
+          | LANGLE Exp SEMI Exp COMMA Exp RANGLE   /* <VertStride;Width,HorzStride> */
            {
                MUST_HOLD(($2 == 0 || $2 == 1 || $2 == 2 || $2 == 4 || $2 == 8 || $2 == 16 || $2 == 32),
                          "VertStride must be 0, 1, 2, 4, 8, 16, or 32");
@@ -1761,16 +1771,16 @@ TwoDimOffset : LPAREN Exp COMMA Exp RPAREN
               $$.elem = (int)$4;
           };
 
-PredVar : VAR
+AddrVar :  VAR
           {
-              TRACE("\n** Predicate Operand");
-              $$ = pCisaBuilder->CISA_find_decl($1);
-              if (!$$ || $$->type != PREDICATE_VAR)
-                  PARSE_ERROR("undefined predicate variable: ", $1);
+              TRACE("\n** Address operand");
+              $$.cisa_decl = pCisaBuilder->CISA_find_decl($1);
+              if (!$$.cisa_decl)
+                  PARSE_ERROR("unbound variable");
+              $$.row = 0;
+              $$.elem = 0;
           }
-
-AddrVar :
-         VAR LPAREN Exp RPAREN
+         |  VAR LPAREN Exp RPAREN
           {
               TRACE("\n** Address operand");
 
@@ -1780,7 +1790,7 @@ AddrVar :
               $$.row = 1;
               $$.elem = (int)$3;
           }
-          // 1   2      3   4       5    6     7
+          // 1   2   3   4   5    6     7
          |  VAR LPAREN Exp RPAREN LANGLE NUMBER RANGLE
           {
               TRACE("\n** Address operand");
@@ -1791,6 +1801,15 @@ AddrVar :
               $$.row = (int)$6;
               $$.elem = (int)$3;
           }
+         |  VAR LPAREN Exp COMMA Exp RPAREN
+          {
+              TRACE("\n** Address operand");
+              $$.cisa_decl = pCisaBuilder->CISA_find_decl($1);
+              if (!$$.cisa_decl)
+                  PARSE_ERROR("unbound variable");
+              $$.row = (int)$3;
+              $$.elem = (int)$5;
+          };
 
 AddressableVar : VAR {
               // Both GENERAL_VAR and SURFACE_VAR are addressable
@@ -2044,14 +2063,8 @@ static bool ParseAlign(CISA_IR_Builder* pCisaBuilder, const char *sym, VISA_Alig
         value = ALIGN_OWORD;
     } else if (strcmp(sym, "GRF") == 0) {
         value = ALIGN_GRF;
-    } else if (strcmp(sym, "GRFx2") == 0 || strcmp(sym, "2GRF") == 0) {
+    } else if (strcmp(sym, "GRFx2") == 0) {
         value = ALIGN_2_GRF;
-    } else if (strcmp(sym, "hword") == 0) {
-        value = ALIGN_HWORD;
-    } else if (strcmp(sym, "wordx32") == 0) {
-        value = ALIGN_32WORD;
-    } else if (strcmp(sym, "wordx64") == 0) {
-        value = ALIGN_64WORD;
     } else {
         value = ALIGN_UNDEF;
         return false;

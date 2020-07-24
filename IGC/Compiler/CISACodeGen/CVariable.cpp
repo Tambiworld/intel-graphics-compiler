@@ -90,10 +90,8 @@ getAlignment(e_alignment align)
     case EALIGN_DWORD:  return 4;
     case EALIGN_QWORD:  return 8;
     case EALIGN_OWORD:  return 16;
-    case EALIGN_HWORD:    return 32;
-    case EALIGN_32WORD:   return 64;
-    case EALIGN_64WORD:   return 128;
-
+    case EALIGN_GRF:    return 32;
+    case EALIGN_2GRF:   return 64;
     default:
         break;
     }

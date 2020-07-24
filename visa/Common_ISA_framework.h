@@ -259,7 +259,6 @@ public:
 
     void patchKernel(int index, unsigned int genxBufferSize, void * buffer, int platform);
     void patchFunction(int index, unsigned genxBufferSize);
-    void patchFunctionWithGenBinary(int index, unsigned int genxBufferSize, char* buffer);
 
     Options *getOptions(){ return m_options; }
 

@@ -1641,10 +1641,7 @@ SPIRVToLLVM::transType(SPIRVType *T) {
   }
   case OpTypeStruct: {
     auto ST = static_cast<SPIRVTypeStruct *>(T);
-    auto Name = ST->getName();
-    if (Name.empty())
-        Name = "structtype";
-    auto *pStructTy = StructType::create(*Context, Name);
+    auto *pStructTy = StructType::create(*Context, ST->getName());
     mapType(ST, pStructTy);
     SmallVector<Type *, 4> MT;
     for (size_t I = 0, E = ST->getMemberCount(); I != E; ++I)

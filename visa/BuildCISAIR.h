@@ -231,7 +231,7 @@ public:
         int line_no);
 
     bool CISA_create_mov_instruction(
-        VISA_opnd *dst, CISA_GEN_VAR *src0, int line_no);
+        VISA_opnd *dst, const char *src0, int line_no);
 
     bool CISA_create_movs_instruction(
         VISA_EMask_Ctrl emask,
@@ -253,9 +253,10 @@ public:
 
     bool CISA_create_cmp_instruction(
         VISA_Cond_Mod sub_op,
+        ISA_Opcode opcode,
         VISA_EMask_Ctrl emask,
         unsigned exec_size,
-        CISA_GEN_VAR* decl,
+        const char *name,
         VISA_opnd *src0,
         VISA_opnd *src1,
         int line_no);
@@ -377,9 +378,9 @@ public:
         ISA_Opcode opcode,
         VISA_EMask_Ctrl emask,
         unsigned exec_size,
-        CISA_GEN_VAR *dst,
-        CISA_GEN_VAR *src0,
-        CISA_GEN_VAR *src1,
+        const char *dst,
+        const char *src0,
+        const char *src1,
         int line_no);
 
     bool CISA_create_math_instruction(
@@ -397,7 +398,7 @@ public:
         ISA_Opcode opcode,
         VISA_EMask_Ctrl emask,
         unsigned exec_size,
-        CISA_GEN_VAR *dst,
+        const char *dst,
         VISA_opnd *src0,
         int line_no);
 
@@ -769,7 +770,7 @@ public:
     VISA_opnd * CISA_create_state_operand(
         const char * var_name, unsigned char offset, int line_no, bool isDst);
     VISA_opnd * CISA_create_predicate_operand(
-        CISA_GEN_VAR * var, VISA_PREDICATE_STATE state,
+        const char * var_name, VISA_Modifier mod, VISA_PREDICATE_STATE state,
         const char * pred_cntrl, int line_no);
     VISA_opnd * CISA_create_RAW_NULL_operand(int line_no);
     VISA_opnd * CISA_create_RAW_operand(const char * var_name, unsigned short offset, int line_no);
@@ -784,8 +785,7 @@ public:
         string_pool_entry **spool, const char *str,
         Common_ISA_Var_Class type, VISA_Type data_type);
 
-    // getKernels - get all kernels and functions added into this builder
-    std::list<VISAKernelImpl*>& getKernels() { return m_kernelsAndFunctions; }
+    std::list<VISAKernelImpl*>& getKernels() { return m_kernels; }
 
     void InitVisaWaTable(TARGET_PLATFORM platform, Stepping step);
 
@@ -797,7 +797,6 @@ public:
     void* getGtpinInit() { return gtpin_init; }
 
 
-
 private:
 
     vISA::Mem_Manager m_mem;
@@ -806,8 +805,9 @@ private:
     unsigned int m_kernel_count;
     unsigned int m_function_count;
 
-    // list of kernels and functions added to this builder
-    std::list<VISAKernelImpl *> m_kernelsAndFunctions;
+    std::list<VISAKernelImpl *> m_kernels;
+    //keeps track of functions for stitching purposes, after compilation.
+    std::vector<VISAFunction *> m_functionsVector;
     // for cases of several kernels/functions in one CisaBuilder
     // we need to keep a mapping of kernels to names
     // to make GetVISAKernel() work

@@ -80,6 +80,8 @@ namespace IGC
 
         /// Asm - Target of Dwarf emission.
         StreamEmitter* Asm;
+        /// m_pModule - VISA processed module
+        VISAModule* m_pModule;
 
         // Holders for some common dwarf information.
         IGC::DwarfDebug* DD;
@@ -114,7 +116,7 @@ namespace IGC
 
     public:
         CompileUnit(unsigned UID, DIE* D, llvm::DICompileUnit* CU,
-            StreamEmitter* A, IGC::DwarfDebug* DW);
+            StreamEmitter* A, VISAModule* M, IGC::DwarfDebug* DW);
         ~CompileUnit();
 
         // Accessors.
@@ -235,9 +237,6 @@ namespace IGC
         /// addTemplateParams - Add template parameters in buffer.
         void addTemplateParams(DIE& Buffer, llvm::DINodeArray TParams);
 
-        ///  addRegisterLoc - Decide whether to emit regx or bregx
-        void addRegisterLoc(DIEBlock* TheDie, unsigned DWReg, int64_t Offset, const llvm::Instruction* dbgInst);
-
         /// addRegisterOp - Add register operand.
         void addRegisterOp(DIEBlock* TheDie, unsigned Reg);
 
@@ -277,7 +276,7 @@ namespace IGC
 
         // addScratchLocation - add a sequence of attributes to emit scratch space location
         // of variable
-        void addScratchLocation(DIEBlock* Block, DbgDecoder::VarInfo* varInfo, int32_t vectorOffset);
+        void addScratchLocation(DIEBlock* Block, DbgDecoder::VarInfo* varInfo);
 
         // addSLMLocation - add a sequence of attributes to emit SLM location of variable
         void addSLMLocation(DIEBlock* Block, VISAVariableLocation* Loc);
@@ -288,7 +287,7 @@ namespace IGC
 
         // addSimdLaneScalar - add a sequence of attributes to calculate location of scalar variable
         // e.g. a GRF subregister.
-        void addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, VISAVariableLocation* Loc, uint16_t subRegInBytes);
+        void addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, uint16_t subReg, bool isPacked);
 
         /// getOrCreateNameSpace - Create a DIE for DINameSpace.
         DIE* getOrCreateNameSpace(llvm::DINamespace* NS);

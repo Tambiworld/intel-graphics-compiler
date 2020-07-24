@@ -41,7 +41,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <algorithm>
 #include <iomanip>
 #include <stack>
-#include <optional>
 
 #include "Mem_Manager.h"
 #include "G4_Opcode.h"
@@ -346,7 +345,7 @@ public:
         return createExtDesc(funcID, isEot, 0, 0);
     }
 
-    static uint32_t createMRTExtDesc(bool src0Alpha, uint8_t RTIndex, bool isEOT, uint32_t extMsgLen, uint16_t extFuncCtrl)
+    static uint32_t createMRTExtDesc(bool src0Alpha, uint8_t RTIndex, bool isEOT, uint32_t extMsgLen)
     {
         ExtDescData data;
         data.value = 0;
@@ -355,7 +354,6 @@ public:
         data.layout.src0Alpha = src0Alpha;
         data.layout.eot = isEOT;
         data.layout.extMsgLength = extMsgLen;
-        data.layout.extFuncCtrl = extFuncCtrl;
         return data.value;
     }
 
@@ -544,10 +542,9 @@ protected:
     // instruction's id in BB. Each optimization should re-initialize before using
     int32_t   local_id;
 
-    static const int UndefinedCisaOffset = -1;
-    int srcCISAoff = UndefinedCisaOffset; // record CISA inst offset that resulted in this instruction
+    int srcCISAoff; // record CISA inst offset that resulted in this instruction
 
-    Metadata* MD = nullptr;
+    MDLocation* location;
 
 #define UNDEFINED_GEN_OFFSET -1
     int64_t genOffset = UNDEFINED_GEN_OFFSET;
@@ -676,9 +673,7 @@ public:
         G4_Operand* s2,
         unsigned int opt);
 
-    virtual ~G4_INST()
-    {
-    }
+    virtual ~G4_INST() {}
 
     // The method is declared virtual so subclasses of G4_INST
     // should also implement this method to populate members
@@ -831,6 +826,28 @@ public:
         return (G4_Label*) getSrc(0);
     }
 
+    MDLocation *getLocation() const { return location; }
+    void setLocation(MDLocation* loc) {
+        location = loc;
+    }
+    void setLineNo(int i) {
+        if (location != nullptr)
+            location->setLineNo(i);
+    }
+    int getLineNo() const {
+        if (location == nullptr)
+            return 0;
+        return location->getLineNo();
+    }
+    void setSrcFilename(const char* filename) {
+        if (location != nullptr)
+            location->setSrcFilename(filename);
+    }
+    const char* getSrcFilename() const {
+        if (location == nullptr)
+            return nullptr;
+        return location->getSrcFilename();
+    }
     void setDest(G4_DstRegRegion* opnd);
     void setExecSize(unsigned char s);
 
@@ -949,7 +966,6 @@ public:
 
     void setCISAOff(int offset) { srcCISAoff = offset; }
     int getCISAOff() const { return srcCISAoff; }
-    bool isCISAOffValid() const { return getCISAOff() != UndefinedCisaOffset; }
 
     bool isOptBarrier() const;
     bool hasImplicitAccSrc() const
@@ -1156,46 +1172,6 @@ public:
 
     TARGET_PLATFORM getPlatform() const;
 
-    void setMetadata(const std::string& key, MDNode* value);
-
-    MDNode* getMetadata(const std::string& key) const
-    {
-        return MD ? MD->getMetadata(key) : nullptr;
-    }
-
-    void setComments(const std::string& comments);
-
-    std::string getComments()
-    {
-        auto comments = getMetadata(Metadata::InstComment);
-        return comments && comments->isMDString() ? comments->asMDString()->getData() : "";
-    }
-
-    MDLocation* getLocation() const
-    {
-        auto location = getMetadata(Metadata::InstLoc);
-        return (location && location->isMDLocation()) ? location->asMDLocation() : nullptr;
-    }
-
-    void setLocation(MDLocation* loc)
-    {
-        setMetadata(Metadata::InstLoc, loc);
-    }
-
-    int getLineNo() const
-    {
-        auto location = getLocation();
-        return location ? location->getLineNo() : 0;
-    }
-
-    const char* getSrcFilename() const
-    {
-        auto location = getLocation();
-        return location ? location->getSrcFilename() : nullptr;
-    }
-
-    void inheritDIFrom(const G4_INST* inst);
-
 private:
     bool detectComprInst() const;
     bool isLegalType(G4_Type type, Gen4_Operand_Number opndNum) const;
@@ -1207,6 +1183,7 @@ std::ostream& operator<<(std::ostream& os, vISA::G4_INST& inst);
 
 namespace vISA
 {
+
 
 class G4_InstMath : public G4_INST
 {
@@ -1360,30 +1337,6 @@ public:
         {
             return nullptr;
         }
-    }
-
-    void pseudoCallToCall()
-    {
-        assert(isFCall() || op == G4_pseudo_fc_call);
-        setOpcode(G4_call);
-    }
-
-    void pseudoRetToRet()
-    {
-        assert(isFReturn() || op == G4_pseudo_fc_ret);
-        setOpcode(G4_return);
-    }
-
-    void callToFCall()
-    {
-        assert(isCall());
-        setOpcode(G4_pseudo_fcall);
-    }
-
-    void retToFRet()
-    {
-        assert(isReturn());
-        setOpcode(G4_pseudo_fret);
     }
 };
 
@@ -1707,7 +1660,6 @@ namespace vISA
 
     private:
         std::list<std::pair<uint32_t, uint32_t>> liveIntervals;
-        std::vector<std::pair<unsigned int, unsigned int>> saveRestore;
         uint32_t cleanedAt;
         DebugLiveIntervalState state;
         uint32_t openIntervalVISAIndex;
@@ -1717,7 +1669,6 @@ namespace vISA
 
         void addLiveInterval(uint32_t start, uint32_t end);
         void liveAt(uint32_t cisaOff);
-        const std::vector<std::pair<uint32_t, uint32_t>>& getSaveRestore();
         void getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals);
         void clearLiveIntervals() { liveIntervals.clear(); }
 
@@ -1735,21 +1686,6 @@ namespace vISA
             //MUST_BE_TRUE(state == Open, "Cannot close interval in Close state");
             state = Closed;
             addLiveInterval(VISAIndex, openIntervalVISAIndex);
-        }
-
-        bool isLiveAt(uint32_t VISAIndex) const
-        {
-            for (auto& k : liveIntervals)
-            {
-                if (k.first <= VISAIndex && k.second >= VISAIndex)
-                    return true;
-            }
-            return false;
-        }
-
-        void addGRFSave(uint32_t cisaIndex, uint32_t stack_Slot)
-        {
-            saveRestore.push_back(std::make_pair(cisaIndex, stack_Slot));
         }
 
         LiveIntervalInfo() { cleanedAt = 0; state = Closed; openIntervalVISAIndex = 0; }
@@ -2296,7 +2232,7 @@ public:
         return const_cast<G4_Predicate*>(((const G4_Operand *)this)->asPredicate());
     }
 
-    const G4_CondMod* asCondMod() const {
+    const G4_CondMod*    asCondMod() const {
 #ifdef _DEBUG
         if (!isCondMod())
         {
@@ -2305,7 +2241,6 @@ public:
 #endif
         return reinterpret_cast<const G4_CondMod*>(this);
     }
-
     G4_CondMod* asCondMod()
     {
         return const_cast<G4_CondMod*>(((const G4_Operand *)this)->asCondMod());
@@ -2325,13 +2260,6 @@ public:
     {
         return const_cast<G4_Label*>(((const G4_Operand *)this)->asLabel());
     }
-
-    bool isSrc() const
-    {
-        return isImm() || isAddrExp() || isSrcRegRegion();
-    }
-
-    bool isScalarSrc() const;
 
     bool crossGRF()
     {
@@ -3200,6 +3128,15 @@ public:
     G4_RegAccess   getRegAccess() const { return acc; }
     short          getRegOff() const { return regOff; }
     short          getSubRegOff() const { return subRegOff; }
+    void  setSubRegOff(short off)
+    {
+        if (subRegOff != off)
+        {
+            subRegOff = off;
+            computeLeftBound();
+            unsetRightBound();
+        }
+    }
 
     bool isCrossGRFDst()
     {
@@ -3309,6 +3246,7 @@ public:
 
         return false;
     }
+
 };
 }
 
@@ -4080,7 +4018,6 @@ public:
     uint32_t getOffset() const { return offset; }
     G4_Declare* getFP() const { return fp; }
     G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
-    G4_SrcRegRegion* getPayload() const { return getSrc(1)->asSrcRegRegion(); }
 
     void setNumRows(uint32_t r) { numRows = r; }
     void setOffset(uint32_t o) { offset = o; }
@@ -4163,11 +4100,6 @@ private:
     uint32_t numRows = 0;
     uint32_t offset = InvalidOffset;
 };
-
-inline bool G4_Operand::isScalarSrc() const
-{
-    return isImm() || isAddrExp() || (isSrcRegRegion() && asSrcRegRegion()->isScalar());
-}
 
 } // namespace vISA
 

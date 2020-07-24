@@ -323,7 +323,6 @@ struct ExecutionEnivronment
     DWORD  NumGRFRequired                             = 0;
     DWORD  WorkgroupWalkOrder[3]                      = {};
     bool   HasGlobalAtomics                           = false;
-    bool   UseBindlessMode                            = false;
 };
 
 struct KernelTypeProgramBinaryInfo

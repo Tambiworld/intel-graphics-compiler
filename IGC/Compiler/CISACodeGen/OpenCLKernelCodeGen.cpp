@@ -580,18 +580,30 @@ namespace IGC
 
     void COpenCLKernel::CreatePrintfStringAnnotations()
     {
-        std::vector<std::pair<unsigned int, std::string>> printfStrings;
-        GetPrintfStrings(printfStrings);
+        std::string MDNodeName = "printf.strings";
+        NamedMDNode* printfMDNode = entry->getParent()->getOrInsertNamedMetadata(MDNodeName);
 
-        for (auto printfString : printfStrings)
+        for (uint i = 0, NumStrings = printfMDNode->getNumOperands();
+            i < NumStrings;
+            i++)
         {
             iOpenCL::PrintfStringAnnotation* printfAnnotation = new iOpenCL::PrintfStringAnnotation();
+
+            llvm::MDNode* argMDNode = printfMDNode->getOperand(i);
+
+            llvm::ConstantInt* indexOpndVal =
+                mdconst::dyn_extract<llvm::ConstantInt>(argMDNode->getOperand(0));
+            llvm::Metadata* stringOpnd = argMDNode->getOperand(1);
+            llvm::MDString* stringOpndVal = dyn_cast<llvm::MDString>(stringOpnd);
+
+            llvm::StringRef stringData(stringOpndVal->getString());
+
             printfAnnotation->AnnotationSize = sizeof(printfAnnotation);
-            printfAnnotation->Index = printfString.first;
-            printfAnnotation->StringSize = printfString.second.size() + 1;
+            printfAnnotation->Index = int_cast<unsigned int>(indexOpndVal->getZExtValue());
+            printfAnnotation->StringSize = stringData.size() + 1;
             printfAnnotation->StringData = new char[printfAnnotation->StringSize + 1];
 
-            memcpy_s(printfAnnotation->StringData, printfAnnotation->StringSize, printfString.second.c_str(), printfAnnotation->StringSize);
+            memcpy_s(printfAnnotation->StringData, printfAnnotation->StringSize, stringData.data(), printfAnnotation->StringSize);
             printfAnnotation->StringData[printfAnnotation->StringSize - 1] = '\0';
 
             m_kernelInfo.m_printfStringAnnotations.push_back(printfAnnotation);
@@ -1831,8 +1843,6 @@ namespace IGC
 
         m_kernelInfo.m_executionEnivronment.NumGRFRequired = ProgramOutput()->m_numGRFTotal;
 
-
-        m_kernelInfo.m_executionEnivronment.UseBindlessMode = m_Context->m_InternalOptions.UseBindlessMode;
     }
 
     void COpenCLKernel::RecomputeBTLayout()
@@ -2027,16 +2037,17 @@ namespace IGC
         bool noRetry = ((subGrpSize > 0 || pOutput->m_scratchSpaceUsedBySpills < 1000) &&
             ctx->m_instrTypes.mayHaveIndirectOperands);
 
-        bool optDisable = false;
-        if (ctx->getModuleMetaData()->compOpt.OptDisable)
+        bool fullDebugInfo = false;
+        if (ctx->m_instrTypes.hasDebugInfo)
         {
-            optDisable = true;
+            IF_DEBUG_INFO(bool hasLineNumber = false;)
+                IF_DEBUG_INFO(IGC::DebugMetadataInfo::hasAnyDebugInfo(ctx, fullDebugInfo, hasLineNumber);)
         }
 
         if (pOutput->m_scratchSpaceUsedBySpills == 0 ||
             noRetry ||
             ctx->m_retryManager.IsLastTry() ||
-            optDisable)
+            fullDebugInfo)
         {
             // Save the shader program to the state processor to be handled later
             if (ctx->m_programOutput.m_ShaderProgramList.size() == 0 ||
@@ -2362,11 +2373,16 @@ namespace IGC
             // Here we check profitablility, etc.
             if (simdMode == SIMDMode::SIMD16)
             {
-                bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
-
-                if (optDisable)
+                if (pCtx->m_instrTypes.hasDebugInfo)
                 {
-                    return SIMDStatus::SIMD_FUNC_FAIL;
+                    bool hasFullDebugInfo = false;
+                    IF_DEBUG_INFO(bool hasLineNumbersOnly = false;)
+                        IF_DEBUG_INFO(DebugMetadataInfo::hasAnyDebugInfo(pCtx, hasFullDebugInfo, hasLineNumbersOnly);)
+
+                        if (hasFullDebugInfo)
+                        {
+                            return SIMDStatus::SIMD_FUNC_FAIL;
+                        }
                 }
 
                 // bail out of SIMD16 if it's not profitable.
@@ -2378,13 +2394,17 @@ namespace IGC
             }
             if (simdMode == SIMDMode::SIMD32)
             {
-                bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
-
-                if (optDisable)
+                if (pCtx->m_instrTypes.hasDebugInfo)
                 {
-                    return SIMDStatus::SIMD_FUNC_FAIL;
-                }
+                    bool hasFullDebugInfo = false;
+                    IF_DEBUG_INFO(bool hasLineNumbersOnly = false;)
+                        IF_DEBUG_INFO(DebugMetadataInfo::hasAnyDebugInfo(pCtx, hasFullDebugInfo, hasLineNumbersOnly);)
 
+                        if (hasFullDebugInfo)
+                        {
+                            return SIMDStatus::SIMD_FUNC_FAIL;
+                        }
+                }
                 // bail out of SIMD32 if it's not profitable.
                 Simd32ProfitabilityAnalysis& PA = EP.getAnalysis<Simd32ProfitabilityAnalysis>();
                 if (!PA.isSimd32Profitable())

@@ -180,7 +180,7 @@ namespace vISA
 
                     auto dupOp = samplerHeaderMov->cloneInst();
 
-                    bb->insertBefore(instIt, dupOp);
+                    bb->insert(instIt, dupOp);
                 }
             }
 
@@ -848,7 +848,8 @@ namespace vISA
 
             dupOp = dstInst->cloneInst();
             dupOp->setDest(newDst);
-            dupOp->setLocation(dstInst->getLocation());
+
+            dupOp->setLineNo(dstInst->getLineNo());
             dupOp->setCISAOff(dstInst->getCISAOff());
 
             rematSrc = createSrcRgn(src, dst, newTemp);
@@ -935,7 +936,7 @@ namespace vISA
                 kernel.fg.builder->duplicateOperand(dstInst->getSrc(1))->asSrcRegRegion(),
                 kernel.fg.builder->duplicateOperand(dstInst->asSendInst()->getMsgDescOperand()), dstInst->getOption(),
                 newMsgDesc, kernel.fg.builder->duplicateOperand(dstInst->getSrc(3)), dstInst->getLineNo());
-            dupOp->setLocation(dstInst->getLocation());
+            dupOp->setLineNo(dstInst->getLineNo());
             dupOp->setCISAOff(dstInst->getCISAOff());
 
             newInst.push_back(dupOp);
@@ -1144,7 +1145,7 @@ namespace vISA
                                 rematSrc = rematerialize(src->asSrcRegRegion(), bb, uniqueDef, newInsts, cacheInst);
                                 while (!newInsts.empty())
                                 {
-                                    bb->insertBefore(instIt, newInsts.front());
+                                    bb->insert(instIt, newInsts.front());
                                     newInsts.pop_front();
                                 }
 

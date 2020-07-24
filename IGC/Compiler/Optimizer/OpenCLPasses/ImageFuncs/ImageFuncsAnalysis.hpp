@@ -110,8 +110,6 @@ namespace IGC
         ///        contain many values (e.g. there are many IMAGE_WIDTHs, potentially
         ///        one for each image).
         ImplicitArg::ArgMap m_argMap;
-        /// @brief  MetaData utils used to generate LLVM metadata
-        IGCMD::MetaDataUtils* m_pMDUtils;
     };
 
 } // namespace IGC

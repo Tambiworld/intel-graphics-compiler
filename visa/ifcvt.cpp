@@ -564,7 +564,7 @@ void IfConverter::fullConvert(IfConvertible &IC) {
                 I->setPredicate(fg.builder->createPredicate(pred));
             }
         }
-        head->insertBefore(pos, I);
+        head->insert(pos, I);
     }
     markEmptyBB(fg.builder, s0);
     // Merge predicated 'else' into header.
@@ -596,7 +596,7 @@ void IfConverter::fullConvert(IfConvertible &IC) {
                     I->setPredicate(fg.builder->createPredicate(pred));
                 }
             }
-            head->insertBefore(pos, I);
+            head->insert(pos, I);
         }
         markEmptyBB(fg.builder, s1);
     }

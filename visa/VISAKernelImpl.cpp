@@ -47,7 +47,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "IsaDisassembly.h"
 #include "LocalScheduler/SWSB_G4IR.h"
 #include "visa/include/RelocationInfo.h"
-#include "InstSplit.h"
 
 #if defined( _DEBUG ) && ( defined( _WIN32 ) || defined( _WIN64 ) )
 #include <windows.h>
@@ -180,26 +179,26 @@ void replaceFCOpcodes(IR_Builder& builder)
 {
     BB_LIST_ITER bbEnd = builder.kernel.fg.end();
 
-    for (BB_LIST_ITER bb_it = builder.kernel.fg.begin();
+    for(BB_LIST_ITER bb_it = builder.kernel.fg.begin();
         bb_it != bbEnd;
         bb_it++)
     {
         G4_BB* bb = (*bb_it);
 
-        if (bb->size() > 0)
+        if(bb->size() > 0)
         {
             // pseudo_fc_call/ret would always be last
             // instruction in BB so only look at back
             // of instlist.
             G4_INST* lastInstInBB = bb->back();
 
-            if (lastInstInBB->opcode() == G4_pseudo_fc_call)
+            if(lastInstInBB->opcode() == G4_pseudo_fc_call)
             {
-                lastInstInBB->asCFInst()->pseudoCallToCall();
+                lastInstInBB->setOpcode(G4_call);
             }
-            else if (lastInstInBB->opcode() == G4_pseudo_fc_ret)
+            else if(lastInstInBB->opcode() == G4_pseudo_fc_ret)
             {
-                lastInstInBB->asCFInst()->pseudoRetToRet();
+                lastInstInBB->setOpcode(G4_return);
             }
         }
     }
@@ -214,32 +213,14 @@ static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
     case ALIGN_DWORD: dcl->setSubRegAlign(Even_Word); break;//dword aligned;
     case ALIGN_QWORD: dcl->setSubRegAlign(Four_Word); break;//8 byte aligned;
     case ALIGN_OWORD: dcl->setSubRegAlign(Eight_Word); break;//oword aligned;
-    case ALIGN_GRF: //grf aligned;
-        dcl->setSubRegAlign(Sixteen_Word);
-        break;
-    case ALIGN_2_GRF:  //2 grf aligned;
-        {
-            dcl->setSubRegAlign(Sixteen_Word); dcl->setEvenAlign();
-        }
-        break;
-    case ALIGN_HWORD: dcl->setSubRegAlign(Sixteen_Word); break; // grf aligned for 32 bytes GRF
-    case ALIGN_32WORD:
-        {
-            dcl->setSubRegAlign(Sixteen_Word); dcl->setEvenAlign(); break;  //2 grf aligned for 32 bytes
-        }
-        break;
+    case ALIGN_GRF: dcl->setSubRegAlign(GRFALIGN); break; //grf aligned;
+    case ALIGN_2_GRF: dcl->setSubRegAlign(GRFALIGN); dcl->setEvenAlign(); break; //2 grf aligned;
     default: assert(false && "Incorrect vISA alignment"); break;
     }
 }
 
 int VISAKernelImpl::compileTillOptimize()
 {
-    if (m_options->getOption(vISA_splitInstructions))
-    {
-        InstSplitPass instSplit(m_builder);
-        instSplit.run();
-    }
-
     // For separate compilation run compilation till RA then return
     startTimer(TIMER_CFG);
     m_kernel->fg.constructFlowGraph(m_builder->instList);
@@ -763,47 +744,12 @@ void VISAKernelImpl::createBindlessSampler()
     }
 }
 
-void VISAKernelImpl::createReservedKeywordSet() {
-    for (int i = 0; i < ISA_NUM_OPCODE; i++) {
-        const VISA_INST_Desc &desc = CISA_INST_table[i];
-        if (desc.name != nullptr)
-            reservedNames.insert(desc.name);
-        int subOpsLen = 0;
-        const ISA_SubInst_Desc *subOps = getSubInstTable(desc.opcode, subOpsLen);
-        if (subOps != nullptr) {
-            // e.g. ops like ISA_SVM have a sub-table of operations
-            for (int si = 0; si < subOpsLen; si++) {
-                // some tables have padding and empty ops; a nullptr name indicates that
-                if (subOps[si].name != nullptr)
-                    reservedNames.insert(subOps[si].name);
-            }
-        }
-    }
-
-}
-
-bool VISAKernelImpl::isReservedName(const std::string &nm) const {
-    auto opItr = reservedNames.find(nm);
-    return (opItr != reservedNames.end());
-}
-
 void VISAKernelImpl::ensureVariableNameUnique(const char *&varName)
 {
-    // legalize the LLVM name to vISA standards; some examples follow:
-    // given  ==> we fix it to this
-    // 1.  "0"  ==> "_0"              (LLVM name)
-    // 2.  "add.i.i" ==> "add_i_i"    (LLVM compound name)
-    // 3.  "mul" ==> "mul_"           (vISA keyword)
-    // 4.  suppose both variable "x" and "x0" exist
-    //       "x" ==> "x_1"            (since "x0" already used)
-    //       "x0" ==> "x0_1"          (it's a dumb suffixing strategy)
+    // escape the name to ensure it's a legal vISA identifier
     std::stringstream escdName;
-
-    // step 1
     if (isdigit(varName[0]))
         escdName << '_';
-
-    // step 2
     for (size_t i = 0, slen = strlen(varName); i < slen; i++) {
         char c = varName[i];
         if (!isalnum(c)) {
@@ -812,11 +758,6 @@ void VISAKernelImpl::ensureVariableNameUnique(const char *&varName)
         escdName << c;
     }
 
-    // case 3: "mul" ==> "mul_"
-    while (isReservedName(escdName.str()))
-        escdName << '_';
-
-    // case 4: if "x" already exists, then use "x_#" where # is 0,1,..
     std::string varNameS = escdName.str();
     if (varNames.find(varNameS) != varNames.end()) {
         // not unqiue, add a counter until it is unique
@@ -827,12 +768,14 @@ void VISAKernelImpl::ensureVariableNameUnique(const char *&varName)
             varNameS = ss.str();
         } while (varNames.find(varNameS) != varNames.end());
     }
+
     varNames.insert(varNameS);
 
     char *buf = (char*)m_mem.alloc(varNameS.size() + 1);
     memcpy_s(buf, varNameS.size(), varNameS.c_str(), varNameS.size());
     buf[varNameS.size()] = 0;
     varName = buf;
+    varNames.insert(varNameS);
 }
 
 void VISAKernelImpl::generateVariableName(Common_ISA_Var_Class Ty, const char *&varName)
@@ -888,8 +831,10 @@ void VISAKernelImpl::generateVariableName(Common_ISA_Var_Class Ty, const char *&
 
 std::string VISAKernelImpl::getVarName(VISA_GenVar* decl) const
 {
-    assert(m_GenVarToNameMap.count(decl) && "Can't find the decl's name");
-    return m_GenVarToNameMap.find(decl)->second;
+    int index = getDeclarationID(decl);
+    stringstream ss;
+    ss << "V" << index;
+    return ss.str();
 }
 std::string VISAKernelImpl::getVarName(VISA_PredVar* decl) const
 {
@@ -953,10 +898,9 @@ int VISAKernelImpl::CreateVISAGenVar(
         return VISA_FAILURE;
     }
 
-    m_GenVarToNameMap[decl] = varName;
-
     info->bit_properties = (uint8_t)dataType;
     info->bit_properties += varAlign << 4;
+    info->bit_properties += STORAGE_REG << 7;
 
     info->num_elements = (uint16_t)numberElements;
     info->alias_offset = 0;
@@ -971,8 +915,6 @@ int VISAKernelImpl::CreateVISAGenVar(
 
     info->attribute_count = 0;
     info->attributes = NULL;
-
-    decl->index = m_var_info_count++;
 
     if(IS_GEN_BOTH_PATH)
     {
@@ -1018,10 +960,16 @@ int VISAKernelImpl::CreateVISAGenVar(
         // Write asm variable decl to stream
         if (IsAsmWriterMode())
         {
+            unsigned funcId = 0;
+            if (!this->getIsKernel())
+            {
+                this->GetFunctionId(funcId);
+            }
             VISAKernel_format_provider fmt(this);
-            m_CISABuilder->m_ssIsaAsm << printVariableDecl(&fmt, m_printDeclIndex.var_index++, getOptions()) << "\n";
+            m_CISABuilder->m_ssIsaAsm << printVariableDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.var_index++, getIsKernel(), funcId, getOptions()) << endl;
         }
     }
+    decl->index = m_var_info_count++;
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_CREATE_VAR);
@@ -1071,7 +1019,7 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
         if (IsAsmWriterMode())
         {
             VISAKernel_format_provider fmt(this);
-            m_CISABuilder->m_ssIsaAsm << printAddressDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.addr_index++) << "\n";
+            m_CISABuilder->m_ssIsaAsm << printAddressDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.addr_index++) << endl;
         }
     }
 
@@ -1186,7 +1134,7 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
             if (IsAsmWriterMode())
             {
                 VISAKernel_format_provider fmt(this);
-                m_CISABuilder->m_ssIsaAsm << printSamplerDecl(&fmt, m_printDeclIndex.sampler_index++) << "\n";
+                m_CISABuilder->m_ssIsaAsm << printSamplerDecl(&fmt, m_printDeclIndex.sampler_index++) << endl;
             }
             break;
         }
@@ -1197,7 +1145,7 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
             {
                 VISAKernel_format_provider fmt(this);
                 unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
-                m_CISABuilder->m_ssIsaAsm << printSurfaceDecl(&fmt, m_printDeclIndex.surface_index++, numPreDefinedSurfs) << "\n";
+                m_CISABuilder->m_ssIsaAsm << printSurfaceDecl(&fmt, m_printDeclIndex.surface_index++, numPreDefinedSurfs) << endl;
             }
             break;
         }
@@ -1724,7 +1672,7 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
             {
                 // Print input var
                 VISAKernel_format_provider fmt(this);
-                m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << "\n";
+                m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << endl;
             }
         }
     }
@@ -5726,17 +5674,16 @@ int VISAKernelImpl::AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl 
         int num_operands = 0;
         bool isCPSCounter = (cPSCounter)? true: false;
 
-        int mode =  ((int)cntrls.isNullRT      << 12)   |
-                    ((int)cntrls.isSampleIndex << 11)   |
+        int mode =  ((int)cntrls.isSampleIndex << 11)  |
                     ((int)cntrls.isCoarseMode   << 10)  |
                     ((int)cntrls.isPerSample    << 9)   |
                     ((int)(isCPSCounter)        << 8)   |
-                    ((int)cntrls.isLastWrite    << 7)   |
+                    (((int)cntrls.isLastWrite   << 7)   |
                     ((int)cntrls.isStencil      << 6)   |
                     ((int)cntrls.zPresent       << 5)   |
                     ((int)cntrls.oMPresent      << 4)   |
                     ((int)cntrls.s0aPresent     << 3)   |
-                    ((int)cntrls.RTIndexPresent << 2);
+                    ((int)cntrls.RTIndexPresent << 2));
 
         //mode
         ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, mode));
@@ -7462,10 +7409,6 @@ int VISAKernelImpl::AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOp
 
 
 
-
-
-
-
 int VISAKernelImpl::patchLastInst(VISA_LabelOpnd *label)
 {
     if(label->_opnd.other_opnd == CISA_INVALID_VAR_ID)
@@ -7515,7 +7458,7 @@ void VISAKernelImpl::addInstructionToEnd(CisaInst * inst)
     {
         // Print instructions
         VISAKernel_format_provider fmt(this);
-        m_CISABuilder->m_ssIsaAsm << printInstruction(&fmt, inst->getCISAInst(), getOptions()) << "\n";
+        m_CISABuilder->m_ssIsaAsm << printInstruction(&fmt, inst->getCISAInst(), getOptions()) << endl;
     }
 }
 
@@ -8540,7 +8483,7 @@ int64_t VISAKernelImpl::getGenSize() const
     return size;
 }
 
-void VISAKernelImpl::computeAndEmitDebugInfo(VISAKernelImplListTy& functions)
+void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions)
 {
     std::list<VISAKernelImpl*> compilationUnitsForDebugInfo;
     compilationUnitsForDebugInfo.push_back(this);

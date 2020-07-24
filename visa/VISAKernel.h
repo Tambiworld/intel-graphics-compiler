@@ -135,7 +135,6 @@ public:
         m_GenNamedVarMap.emplace_back();
 
         createKernelAttributes();
-        createReservedKeywordSet();
     }
 
     void* alloc(size_t sz) { return m_mem.alloc(sz); }
@@ -582,13 +581,6 @@ public:
     VISA_BUILDER_API int AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOpnd *varId);
 
 
-
-
-
-
-
-
-
     /********** APPEND INSTRUCTION APIS END   ******************/
 
     /********** APPEND 3D Instructions START ******************/
@@ -608,8 +600,7 @@ public:
         int numMsgSpecificOpnds,
         VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dLoad(
-        VISASampler3DSubOpCode subOpcode,
+    VISA_BUILDER_API int AppendVISA3dLoad(VISASampler3DSubOpCode subOpcode,
         bool pixelNullMask,
         VISA_PredOpnd *pred,
         VISA_EMask_Ctrl emask,
@@ -621,8 +612,7 @@ public:
         int numMsgSpecificOpnds,
         VISA_RawOpnd ** opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dGather4(
-        VISASampler3DSubOpCode subOpcode,
+    VISA_BUILDER_API int AppendVISA3dGather4(VISASampler3DSubOpCode subOpcode,
         bool pixelNullMask,
         VISA_PredOpnd *pred,
         VISA_EMask_Ctrl emask,
@@ -637,18 +627,15 @@ public:
 
     VISA_BUILDER_API int AppendVISA3dInfo(VISASampler3DSubOpCode subOpcode, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISAChannelMask srcChannel, VISA_StateOpndHandle *surface, VISA_RawOpnd *lod, VISA_RawOpnd *dst);
 
-    VISA_BUILDER_API int AppendVISA3dRTWrite(
-        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
+    VISA_BUILDER_API int AppendVISA3dRTWrite(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
         VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd, VISA_VectorOpnd *sampleIndex,
         uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dRTWriteCPS(
-        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
+    VISA_BUILDER_API int AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
         VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd, VISA_VectorOpnd *sampleIndex,
         VISA_VectorOpnd *cPSCounter, uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dURBWrite(
-        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
+    VISA_BUILDER_API int AppendVISA3dURBWrite(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
         VISA_Exec_Size executionSize, unsigned char numberOutputParams,
         VISA_RawOpnd *channelMask, unsigned short globalOffset, VISA_RawOpnd *URBHandle,
         VISA_RawOpnd *perSLotOffset, VISA_RawOpnd *vertexData);
@@ -861,12 +848,9 @@ public:
 
     bool IsAsmWriterMode() const { return m_options->getOption(vISA_IsaAssembly); }
 
-    typedef std::list<VISAKernelImpl*> VISAKernelImplListTy;
-    void computeAndEmitDebugInfo(VISAKernelImplListTy& functions);
+    void computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions);
 
 private:
-    void createReservedKeywordSet();
-    bool isReservedName(const std::string &nm) const;
     void ensureVariableNameUnique(const char *&varName);
     void generateVariableName(Common_ISA_Var_Class Ty, const char *&varName);
 
@@ -989,10 +973,8 @@ private:
     typedef std::map<std::string, CISA_GEN_VAR *> GenDeclNameToVarMap;
     std::vector<GenDeclNameToVarMap> m_GenNamedVarMap;
     GenDeclNameToVarMap m_UniqueNamedVarMap;
-
-    // reverse map from a GenVar to its declared name, used in inline assembly
-    // Note that name is only unique within the same scope
-    std::map<CISA_GEN_VAR*, std::string> m_GenVarToNameMap;
+    // std::vector<VISAScope> m_GenNamedVarMap;
+    // VISAScope m_UniqueNamedVarMap;
 
     std::unordered_map<std::string, VISA_LabelOpnd *> m_label_name_to_index_map;
     std::unordered_map<std::string, VISA_LabelOpnd *> m_funcName_to_labelID_map;
@@ -1024,7 +1006,6 @@ private:
     // TODO: this should be merged and re-worked to fit into the symbol table
     // scheme
     std::unordered_set<std::string> varNames;
-    std::unordered_set<std::string> reservedNames;
 
     int m_vISAInstCount;
     print_decl_index_t m_printDeclIndex;

@@ -192,12 +192,6 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
         return;
     }
 
-    if (m_pVISAModule->isDirectElfInput)
-    {
-        auto decodedDbg = new DbgDecoder(m_pVISAModule->m_pShader->ProgramOutput()->m_debugDataGenISA);
-        m_pDwarfDebug->setDecodedDbg(decodedDbg);
-    }
-
     if (!doneOnce)
     {
         m_pDwarfDebug->beginModule();
@@ -211,6 +205,9 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
 
     if (m_pVISAModule->isDirectElfInput)
     {
+        auto decodedDbg = new DbgDecoder(m_pVISAModule->m_pShader->ProgramOutput()->m_debugDataGenISA);
+        m_pDwarfDebug->setDecodedDbg(decodedDbg);
+
         m_pVISAModule->buildDirectElfMaps();
         auto co = m_pVISAModule->getCompileUnit();
 
@@ -241,13 +238,13 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
         {
             for (auto item : m_pVISAModule->GenISAToVISAIndex)
             {
-                if ((item.first >= lastGenOff) || ((item.first | lastGenOff) == 0))
+                if ((item.first > lastGenOff) || ((item.first | lastGenOff) == 0))
                 {
-                    if (item.second <= subEnd || item.second == 0xffffffff)
+                    if (item.second <= subEnd ||
+                        item.second == 0xffffffff)
                     {
                         GenISAToVISAIndex.push_back(item);
-                        auto size = m_pVISAModule->GenISAInstSizeBytes[item.first];
-                        lastGenOff = item.first + size;
+                        lastGenOff = item.first;
                         continue;
                     }
 
@@ -318,27 +315,14 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
                 }
             }
 
-            if (emptyLoc && prevSrcLoc)
+            if (emptyLoc && prevSrcLoc && pFunc->getSubprogram())
             {
-              if (IGC_IS_FLAG_ENABLED(FillMissingDebugLocations))
-              {
-                if (auto scope = pFunc->getSubprogram())
-                {
-                  auto src = m_pDwarfDebug->getOrCreateSourceID(scope->getFilename(), scope->getDirectory(), m_pStreamEmitter->GetDwarfCompileUnitID());
-
-                  // Emit func top as line# for unattributed lines
-                  m_pStreamEmitter->EmitDwarfLocDirective(src, scope->getLine(), 0, 0, 0, 0, scope->getFilename());
-                }
-              }
-              else
-              {
-                auto scope = prevSrcLoc->getScope();
+              auto scope = pFunc->getSubprogram();
                 auto src = m_pDwarfDebug->getOrCreateSourceID(scope->getFilename(), scope->getDirectory(), m_pStreamEmitter->GetDwarfCompileUnitID());
 
-                // Emit 0 as line# for unattributed lines
-                m_pStreamEmitter->EmitDwarfLocDirective(src, 0, 0, 0, 0, 0, scope->getFilename());
-              }
-
+                // TODO It is workaround to not emit empty lines until we figure out a proper solution
+                // Emit func top as line# for unattributed lines
+                m_pStreamEmitter->EmitDwarfLocDirective(src, scope->getLine(), 0, 0, 0, 0, scope->getFilename());
                 prevSrcLoc = DebugLoc();
             }
         }
@@ -349,14 +333,6 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
             {
                 m_pStreamEmitter->EmitInt8(genxISA[i]);
                 lastGenOff++;
-            }
-        }
-        else if (pc != lastGenOff)
-        {
-            // for subroutines
-            for (unsigned int i = pc; i != lastGenOff; i++)
-            {
-                m_pStreamEmitter->EmitInt8(genxISA[i]);
             }
         }
 
@@ -620,9 +596,4 @@ std::string DebugMetadataInfo::getUniqueFuncName(Function& F)
     DebugMetadataInfo::hasAnyDebugInfo(s->GetContext(), fullDebugInfo, lineTableOnly);
 
     return lineTableOnly && !fullDebugInfo;
-}
-
-void DebugEmitter::AddVISAModFunc(IGC::VISAModule* v, llvm::Function* f)
-{
-    m_pDwarfDebug->AddVISAModToFunc(v, f);
 }

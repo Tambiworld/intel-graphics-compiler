@@ -29,7 +29,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/Stats.hpp"
 #include "common/debug/Dump.hpp"
 #include "common/shaderOverride.hpp"
-#include "common/IntrinsicAnnotator.hpp"
 #include "common/LLVMUtils.h"
 
 #include "common/LLVMWarningsPush.hpp"
@@ -92,14 +91,14 @@ void IGCPassManager::add(Pass *P)
         return;
     }
 
-    if (IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsPerPass, TIME_STATS_PER_PASS))
+    if (IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_PASS))
     {
         PassManager::add(createTimeStatsIGCPass(m_pContext, m_name + '_' + std::string(P->getPassName()), STATS_COUNTER_START));
     }
 
     PassManager::add(P);
 
-    if (IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsPerPass, TIME_STATS_PER_PASS))
+    if (IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_PASS))
     {
         PassManager::add(createTimeStatsIGCPass(m_pContext, m_name + '_' + std::string(P->getPassName()), STATS_COUNTER_END));
     }
@@ -138,7 +137,6 @@ IGCPassManager::~IGCPassManager()
 void DumpLLVMIR(IGC::CodeGenContext* pContext, const char* dumpName)
 {
     SetCurrentDebugHash(pContext->hash.asmHash);
-
     if (IGC_IS_FLAG_ENABLED(DumpLLVMIR))
     {
         pContext->getMetaDataUtils()->save(*pContext->getLLVMContext());
@@ -151,12 +149,10 @@ void DumpLLVMIR(IGC::CodeGenContext* pContext, const char* dumpName)
             .Pass(dumpName)
             .Retry(pContext->m_retryManager.GetRetryId())
             .Extension("ll");
-        auto new_annotator = IntrinsicAnnotator();
-        auto annotator = (pContext->annotater != nullptr) ? pContext->annotater : &new_annotator;
         DumpLLVMIRText(
             pContext->getModule(),
             Dump(name, DumpType::PASS_IR_TEXT),
-            annotator);
+            pContext->annotater);
     }
     if (IGC_IS_FLAG_ENABLED(ShaderOverride))
     {

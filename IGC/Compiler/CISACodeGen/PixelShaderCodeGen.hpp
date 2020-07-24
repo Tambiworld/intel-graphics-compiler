@@ -128,9 +128,7 @@ protected:
     void CreatePassThroughVar();
     bool IsReturnBlock(llvm::BasicBlock* bb);
 
-private:
     PSSignature::DispatchSignature& GetDispatchSignature();
-
     CVariable* m_R1;
     CVariable* m_CoarseR1;
     CVariable* m_PerspectivePixel;

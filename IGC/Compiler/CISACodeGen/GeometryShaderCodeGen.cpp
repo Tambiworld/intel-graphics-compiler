@@ -347,9 +347,7 @@ namespace IGC
 
     void CGeometryShader::FillProgram(SGeometryShaderKernelProgram* pKernelProgram)
     {
-        {
-            pKernelProgram->simd8 = *ProgramOutput();
-        }
+        pKernelProgram->simd8 = *ProgramOutput();
 
         CreateGatherMap();
         CreateConstantBufferOutput(pKernelProgram);

@@ -88,7 +88,7 @@ string raw_opnd::toString() const
     return sstr.str();
 }
 
-void vISAVerifier::writeReport(const char* filename)
+void writeReport(const char* filename, ERROR_LIST, KERROR_LIST)
 {
     if (kerror_list.size() > 0 || error_list.size() > 0)
     {
@@ -159,7 +159,7 @@ static string diagDumpInstructionOperandDecls(
             switch (opnd.getOperandClass())
             {
                 case OPERAND_STATE     :
-                case OPERAND_GENERAL   : sstr << printVariableDecl  (header, index-numPreDefinedVars, options); break;
+                case OPERAND_GENERAL   : sstr << printVariableDecl  (isaHeader, header, index-numPreDefinedVars, true, 0, options); break;
                 case OPERAND_ADDRESS   :
                 case OPERAND_INDIRECT  : sstr << printAddressDecl   (isaHeader, header, index); break;
                 case OPERAND_PREDICATE : sstr << printPredicateDecl (header, index); break;
@@ -172,7 +172,7 @@ static string diagDumpInstructionOperandDecls(
         {
             uint32_t index = getRawOperand(inst, i).index;
             if ( numPreDefinedVars <= index && index < header->getVarCount() + numPreDefinedVars )
-                sstr << printVariableDecl(header, index-numPreDefinedVars, options);
+                sstr << printVariableDecl(isaHeader, header, index-numPreDefinedVars, true, 0, options);
         }
         else if (inst->opnd_array[i]->opnd_type == CISA_OPND_OTHER) // new loader only
         {
@@ -217,8 +217,12 @@ static string createIsaError(
     return sstr.str();
 }
 
-void vISAVerifier::verifyPredicateDecl(
-    unsigned declID)
+static void verifyPredicateDecl(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    unsigned declID,
+    ERROR_LIST,
+    Options *options)
 {
     string declError = string(" Error in predicate variable decl: ") + printPredicateDecl(header, declID);
 
@@ -238,7 +242,7 @@ void vISAVerifier::verifyPredicateDecl(
     }
 }
 
-void vISAVerifier::verifyAddressDecl(unsigned declID)
+static void verifyAddressDecl(const common_isa_header& isaHeader, const print_format_provider_t* header, unsigned declID, ERROR_LIST, Options *options)
 {
     string declError = string(" Error in address variable decl: ") + printAddressDecl(isaHeader, header, declID);
 
@@ -261,10 +265,14 @@ void vISAVerifier::verifyAddressDecl(unsigned declID)
     #endif
 }
 
-void vISAVerifier::verifyVariableDecl(
-    unsigned declID)
+static void verifyVariableDecl(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    unsigned declID,
+    ERROR_LIST,
+    Options *options)
 {
-    string declError = string(" Error in CISA variable decl: ") + printVariableDecl(header, declID, options);
+    string declError = string(" Error in CISA variable decl: ") + printVariableDecl(isaHeader, header, declID, true, 0, options);
 
     const var_info_t* var = header->getVar(declID);
     VISA_Align align = var->getAlignment();
@@ -349,12 +357,6 @@ void vISAVerifier::verifyVariableDecl(
             break;
         case ALIGN_2_GRF:
             break;
-        case ALIGN_HWORD:
-            break;
-        case ALIGN_32WORD:
-            break;
-        case ALIGN_64WORD:
-            break;
         default:
             REPORT_HEADER(options,false, "V%d's variable alignment is not a valid alignment value: %s", declID, declError.c_str());
     }
@@ -400,9 +402,13 @@ static unsigned int getStartByteOffset(
     return offset;
 }
 
-void vISAVerifier::verifyRegion(
+static void verifyRegion(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
     const CISA_INST* inst,
-    unsigned i)
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     /// Dataport instructions must be verified separately
@@ -638,10 +644,14 @@ static bool isDWordType(VISA_Type type)
 
 // verify if this raw operand has the correct type as determined by typeFunc (false means illegal type)
 // Many vISA messages require the raw operand to have certain types
-void vISAVerifier::verifyRawOperandType(
+static void verifyRawOperandType(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
     const CISA_INST* inst,
     const raw_opnd& opnd,
-    bool (*typeFunc)(VISA_Type))
+    bool (*typeFunc)(VISA_Type),
+    ERROR_LIST,
+    Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     uint32_t variable_count    = header->getVarCount();
@@ -678,8 +688,10 @@ static VISA_Type getRawOperandType(
     return ISA_TYPE_NUM;
 }
 
-void vISAVerifier::verifyRawOperand(
-    const CISA_INST* inst, unsigned i)
+static void verifyRawOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     uint32_t variable_count    = header->getVarCount();
@@ -772,9 +784,13 @@ static bool isReadWritePreDefinedVar(
     }
 }
 
-void vISAVerifier::verifyVectorOperand(
+static void verifyVectorOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
     const CISA_INST* inst,
-    unsigned i)
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
 
@@ -847,7 +863,7 @@ void vISAVerifier::verifyVectorOperand(
         }
     }
 
-    verifyRegion(inst, i);
+    verifyRegion(isaHeader, header, inst, i, error_list, options);
 
     if (dstIndex == i)
     {
@@ -868,9 +884,13 @@ void vISAVerifier::verifyVectorOperand(
     // ToDo: add bounds check for pre-defined variables
 }
 
-void vISAVerifier::verifyOperand(
+static void verifyOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
     const CISA_INST* inst,
-    unsigned i)
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     MUST_BE_TRUE(inst  , "Argument Exception: argument inst   is NULL.");
@@ -878,14 +898,18 @@ void vISAVerifier::verifyOperand(
     switch (getOperandType(inst, i))
     {
         case CISA_OPND_OTHER  : /* unable to verify some random primitive operand. */ break;
-        case CISA_OPND_VECTOR : verifyVectorOperand(inst, i); break;
-        case CISA_OPND_RAW    : verifyRawOperand   (inst, i); break;
+        case CISA_OPND_VECTOR : verifyVectorOperand(isaHeader, header, inst, i, error_list, options); break;
+        case CISA_OPND_RAW    : verifyRawOperand   (isaHeader, header, inst, i, error_list, options); break;
         default               : MUST_BE_TRUE(false, "Invalid operand type.");
     }
 }
 
-void vISAVerifier::verifyInstructionSVM(
-    const CISA_INST* inst)
+static void verifyInstructionSVM(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     if (hasExecSize((ISA_Opcode)inst->opcode))
     {
@@ -894,8 +918,12 @@ void vISAVerifier::verifyInstructionSVM(
     }
 }
 
-void vISAVerifier::verifyInstructionMove(
-    const CISA_INST* inst)
+static void verifyInstructionMove(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1007,8 +1035,12 @@ void vISAVerifier::verifyInstructionMove(
     }
 }
 
-void vISAVerifier::verifyInstructionSync(
-    const CISA_INST* inst)
+static void verifyInstructionSync(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     switch (opcode)
@@ -1022,58 +1054,36 @@ void vISAVerifier::verifyInstructionSync(
     }
 }
 
-void vISAVerifier::verifyInstructionControlFlow(
-    const CISA_INST* inst)
+static void verifyInstructionControlFlow(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
     switch (opcode)
     {
         case ISA_JMP:
-        case ISA_CALL:
-        {
-            auto labelId = getPrimitiveOperand<uint16_t>(inst, 0);
-            if (labelId >= header->getLabelCount())
-            {
-                REPORT_INSTRUCTION(options, false, "bad label id %d", labelId);
-            }
-            else
-            {
-                auto iter = labelDefs.find(labelId);
-                if (iter == labelDefs.end())
-                {
-                    labelDefs[labelId] = false;
-                }
-                // nothing needs to be done if the label is already in the map
-            }
-            break;
-        }
         case ISA_RET:
+        case ISA_SUBROUTINE:
+        case ISA_CALL:
         case ISA_FRET:
+        case ISA_LABEL:
         case ISA_IFCALL:
         case ISA_FADDR:     // no checks for now
              break;
-        case ISA_SUBROUTINE:
-        case ISA_LABEL:
-        {
-            auto labelId = getPrimitiveOperand<uint16_t>(inst, 0);
-            if (labelId >= header->getLabelCount())
-            {
-                REPORT_INSTRUCTION(options, false, "bad label id %d", labelId);
-            }
-            else
-            {
-                auto iter = labelDefs.find(labelId);
-                if (iter != labelDefs.end() && iter->second)
-                {
-                    REPORT_INSTRUCTION(options, false, "label is redefined");
-                }
-                labelDefs[labelId] = true;
-            }
-            break;
-        }
+        case ISA_GOTO:
         case ISA_FCALL:
         {
+             /// TODO: Reenable this check if possible.
+             #if 0
+             ASSERT_USER(label_id < header->label_count,
+                         "Common ISA inst uses undeclared label.");
+             ASSERT_USER(last_inst->calleeIndex != 0xff,
+                         "Could not resolve fcall destination");
+             #endif
              break;
         }
         case ISA_SWITCHJMP:
@@ -1094,8 +1104,12 @@ void vISAVerifier::verifyInstructionControlFlow(
     }
 }
 
-void vISAVerifier::verifyInstructionMisc(
-    const CISA_INST* inst)
+static void verifyInstructionMisc(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     unsigned i = 0;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
@@ -1305,7 +1319,9 @@ void vISAVerifier::verifyInstructionMisc(
 /// Returns true if this vector operand is an integer immediate constant and
 /// its value fits into an expected type. Returns false, otherwise.
 ///
-bool vISAVerifier::checkImmediateIntegerOpnd(
+static bool checkImmediateIntegerOpnd(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
     const vector_opnd& opnd,
     VISA_Type expected_type)
 {
@@ -1392,8 +1408,12 @@ bool vISAVerifier::checkImmediateIntegerOpnd(
     return false;
 }
 
-void vISAVerifier::verifyInstructionArith(
-    const CISA_INST* inst)
+static void verifyInstructionArith(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options* options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1567,13 +1587,13 @@ void vISAVerifier::verifyInstructionArith(
             bool is_valid_imm = false;
             if (i == 2)
             {
-                is_valid_imm = checkImmediateIntegerOpnd(src, ISA_TYPE_W) ||
-                    checkImmediateIntegerOpnd(src, ISA_TYPE_UW);
+                is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_W) ||
+                    checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UW);
             }
             else
             {
-                is_valid_imm = checkImmediateIntegerOpnd(src, ISA_TYPE_B) ||
-                    checkImmediateIntegerOpnd(src, ISA_TYPE_UB);
+                is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_B) ||
+                    checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UB);
             }
             REPORT_INSTRUCTION(options, is_valid_imm ||
                 (i == 2 && (srcType == ISA_TYPE_W || srcType == ISA_TYPE_UW)) ||
@@ -1637,8 +1657,12 @@ void vISAVerifier::verifyInstructionArith(
     }
 }
 
-void vISAVerifier::verifyInstructionLogic(
-    const CISA_INST* inst)
+static void verifyInstructionLogic(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1713,8 +1737,12 @@ void vISAVerifier::verifyInstructionLogic(
     }
 }
 
-void vISAVerifier::verifyInstructionCompare(
-    const CISA_INST* inst)
+static void verifyInstructionCompare(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ///     opnd0              opnd1  opnd2 opnd3
     /// cmp.rel_op (exec_size) dst    src1  src2
@@ -1746,8 +1774,12 @@ void vISAVerifier::verifyInstructionCompare(
     }
 }
 
-void vISAVerifier::verifyInstructionAddress(
-    const CISA_INST* inst)
+static void verifyInstructionAddress(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     ASSERT_USER(ISA_ADDR_ADD == opcode, "Illegal opcode for address instruction.");
@@ -1795,7 +1827,8 @@ void vISAVerifier::verifyInstructionAddress(
     }
 }
 
-void vISAVerifier::verifyInstructionSampler(const CISA_INST* inst)
+static void verifyInstructionSampler(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
@@ -2524,30 +2557,18 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST* inst)
     }
 }
 
-void vISAVerifier::verifyInstructionSIMDFlow(
-    const CISA_INST* inst)
+static void verifyInstructionSIMDFlow(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     switch (opcode)
     {
         case ISA_GOTO:
-        {
-            auto labelId = getPrimitiveOperand<uint16_t>(inst, 0);
-            if (labelId >= header->getLabelCount())
-            {
-                REPORT_INSTRUCTION(options, false, "bad label id %d", labelId);
-            }
-            else
-            {
-                auto iter = labelDefs.find(labelId);
-                if (iter == labelDefs.end())
-                {
-                    labelDefs[labelId] = false;
-                }
-                // nothing needs to be done if the label is already in the map
-            }
-            break;
-        }
+             break;
         default: REPORT_INSTRUCTION(options,false, "Illegal SIMD CF Instruction Opcode: %d, %s.", opcode, ISA_Inst_Table[opcode].str);
     }
 }
@@ -2572,8 +2593,12 @@ static bool isFType(VISA_Type T)
     return ISA_TYPE_F == T;
 }
 
-void vISAVerifier::verifyInstructionDataport(
-    const CISA_INST* inst)
+static void verifyInstructionDataport(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
@@ -2742,7 +2767,7 @@ void vISAVerifier::verifyInstructionDataport(
              // check that dst/src have dword type
              getRawOperand(inst, i++);  // const raw_opnd& elementOffset
              const raw_opnd& srcDst = getRawOperand(inst, i++);
-             verifyRawOperandType(inst, srcDst, isDWordType);
+             verifyRawOperandType(isaHeader, header, inst, srcDst, isDWordType, error_list, options);
              break;
         }
         case ISA_GATHER4_TYPED:
@@ -2804,7 +2829,7 @@ void vISAVerifier::verifyInstructionDataport(
                                "CISA dataport instruction uses an undeclared surface.");
 
             const raw_opnd& offsets = getRawOperand(inst, i++);
-            verifyRawOperandType(inst, offsets, isUDType);
+            verifyRawOperandType(isaHeader, header, inst, offsets, isUDType, error_list, options);
 
             // Check remaining raw operands.
             VISAAtomicOps subOpKind = static_cast<VISAAtomicOps>(subOpc);
@@ -2842,7 +2867,7 @@ void vISAVerifier::verifyInstructionDataport(
             }
             else
             {
-                verifyRawOperandType(inst, src0, typeFn);
+                verifyRawOperandType(isaHeader, header, inst, src0, typeFn, error_list, options);
             }
             // Check src1:
             //
@@ -2852,7 +2877,7 @@ void vISAVerifier::verifyInstructionDataport(
             const raw_opnd& src1 = getRawOperand(inst, i++);
             if (subOpKind == ATOMIC_CMPXCHG || subOpKind == ATOMIC_FCMPWR)
             {
-                verifyRawOperandType(inst, src1, typeFn);
+                verifyRawOperandType(isaHeader, header, inst, src1, typeFn, error_list, options);
             }
             else
             {
@@ -2866,7 +2891,7 @@ void vISAVerifier::verifyInstructionDataport(
             // - for all other operations, it must have type UD.
             //
             const raw_opnd& dst = getRawOperand(inst, i++);
-            verifyRawOperandType(inst, dst, typeFn);
+            verifyRawOperandType(isaHeader, header, inst, dst, typeFn, error_list, options);
             break;
         }
         case ISA_3D_TYPED_ATOMIC:
@@ -2880,8 +2905,11 @@ void vISAVerifier::verifyInstructionDataport(
 }
 
 
-
-void vISAVerifier::verifyKernelAttributes()
+static void verifyKernelAttributes(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    ERROR_LIST,
+    Options* options)
 {
     /// Verify SLMSize, if present, shows up only once
     unsigned int numSLMSize = 0;
@@ -2901,26 +2929,27 @@ void vISAVerifier::verifyKernelAttributes()
 
 }
 
-void vISAVerifier::verifyKernelHeader()
+void verifyKernelHeader(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, ERROR_LIST, Options *options)
 {
     /// Verify variable decls.
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
     for (unsigned i = 0; i < header->getVarCount(); i++)
     {
-        verifyVariableDecl(i);
+        verifyVariableDecl(isaHeader, header, i, error_list, options);
     }
 
     /// Verify address decls.
     for (unsigned i = 0; i < header->getAddrCount(); i++)
     {
-        verifyAddressDecl(i);
+        verifyAddressDecl(isaHeader, header, i, error_list, options);
     }
 
     /// Verify predicate decls.
     for (unsigned i = 0; i < header->getPredCount(); i++)
     {
-        verifyPredicateDecl(i);
+        verifyPredicateDecl(isaHeader, header, i, error_list, options);
     }
 
     /// Verify labels.
@@ -3044,22 +3073,15 @@ void vISAVerifier::verifyKernelHeader()
         /// TODO: Consider adding offset checks here.
     }
 
-    verifyKernelAttributes();
+    verifyKernelAttributes(isaHeader, header, error_list, options);
 }
 
-void vISAVerifier::finalize()
-{
-    for (auto iter : labelDefs)
-    {
-        if (!(iter.second))
-        {
-            REPORT_HEADER(options, false, "undefined label: %s", header->getString(header->getLabel(iter.first)->name_index));
-        }
-    }
-}
-
-void vISAVerifier::verifyInstruction(
-    const CISA_INST* inst)
+void verifyInstruction(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -3077,7 +3099,7 @@ void vISAVerifier::verifyInstruction(
     }
 
     for (unsigned i = 0; i < inst->opnd_count; i++)
-        verifyOperand(inst, i);
+        verifyOperand(isaHeader, header, inst, i, error_list, options);
 
     if (hasExecSize(opcode))
     {
@@ -3096,23 +3118,40 @@ void vISAVerifier::verifyInstruction(
 
     switch (ISA_Inst_Table[opcode].type)
     {
-        case ISA_Inst_SVM:       verifyInstructionSVM         (inst); break;
-        case ISA_Inst_Mov:       verifyInstructionMove        (inst); break;
-        case ISA_Inst_Sync:      verifyInstructionSync        (inst); break;
-        case ISA_Inst_Flow:      verifyInstructionControlFlow (inst); break;
-        case ISA_Inst_Misc:      verifyInstructionMisc        (inst); break;
-        case ISA_Inst_Arith:     verifyInstructionArith       (inst); break;
-        case ISA_Inst_Logic:     verifyInstructionLogic       (inst); break;
-        case ISA_Inst_Compare:   verifyInstructionCompare     (inst); break;
-        case ISA_Inst_Address:   verifyInstructionAddress     (inst); break;
-        case ISA_Inst_Sampler:   verifyInstructionSampler     (inst); break;
-        case ISA_Inst_SIMD_Flow: verifyInstructionSIMDFlow    (inst); break;
-        case ISA_Inst_Data_Port: verifyInstructionDataport    (inst); break;
+        case ISA_Inst_SVM:       verifyInstructionSVM         (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Mov:       verifyInstructionMove        (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Sync:      verifyInstructionSync        (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Flow:      verifyInstructionControlFlow (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Misc:      verifyInstructionMisc        (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Arith:     verifyInstructionArith       (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Logic:     verifyInstructionLogic       (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Compare:   verifyInstructionCompare     (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Address:   verifyInstructionAddress     (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Sampler:   verifyInstructionSampler     (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_SIMD_Flow: verifyInstructionSIMDFlow    (isaHeader, header, inst, error_list, options); break;
+        case ISA_Inst_Data_Port: verifyInstructionDataport    (isaHeader, header, inst, error_list, options); break;
         default:
         {
             stringstream sstr; sstr << "Illegal or unimplemented CISA instruction (opcode, type): (" << opcode << ", " << ISA_Inst_Table[opcode].type << ").";
             ASSERT_USER(false, sstr.str());
         }
+    }
+}
+
+void verifyRoutine(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    list<CISA_INST*>& instructions,
+    ERROR_LIST,
+    KERROR_LIST,
+    Options *options)
+{
+    verifyKernelHeader(isaHeader, header, kerror_list, options);
+
+    for (auto I = instructions.begin(), E = instructions.end(); I != E; I++)
+    {
+        CISA_INST* inst = *I;
+        verifyInstruction(isaHeader, header, inst, error_list, options);
     }
 }
 

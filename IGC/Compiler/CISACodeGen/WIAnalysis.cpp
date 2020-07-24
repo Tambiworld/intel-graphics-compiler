@@ -443,10 +443,9 @@ void WIAnalysisRunner::updateArgsDependency(llvm::Function* pF)
     bool IsSubroutine = !isEntryFunc(m_pMdUtils, pF) || isNonEntryMultirateShader(pF);
 
     ImplicitArgs implicitArgs(*pF, m_pMdUtils);
-    int implicitArgStart = (unsigned)(IGCLLVM::GetFuncArgSize(pF)
+    unsigned implicitArgStart = (unsigned)(IGCLLVM::GetFuncArgSize(pF)
         - implicitArgs.size()
         - (IsSubroutine ? 0 : m_ModMD->pushInfo.pushAnalysisWIInfos.size()));
-    IGC_ASSERT(implicitArgStart >= 0 && "Function arg size does not match meta data and push args.");
 
     llvm::Function::arg_iterator ai, ae;
     ai = pF->arg_begin();
@@ -454,7 +453,7 @@ void WIAnalysisRunner::updateArgsDependency(llvm::Function* pF)
 
     // 1. add all kernel function args as uniform, or
     //    add all subroutine function args as random
-    for (int i = 0; i < implicitArgStart; ++i, ++ai)
+    for (unsigned i = 0; i < implicitArgStart; ++i, ++ai)
     {
         IGC_ASSERT(ai != ae);
         incUpdateDepend(&(*ai), IsSubroutine ? WIAnalysis::RANDOM : WIAnalysis::UNIFORM);
@@ -758,10 +757,12 @@ void WIAnalysisRunner::update_cf_dep(const IGCLLVM::TerminatorInst* inst)
     {
         BasicBlock* def_blk = *blk_it;
         // add the branch into the controlling-branch set of the block
-        // if the block is in the influence-region
-        IGC_ASSERT(def_blk != br_info.full_join);
-        m_ctrlBranches[def_blk].insert(inst);
-
+        // if the block is in the influence-region, and not a partial join
+        bool is_join = (br_info.partial_joins.count(def_blk) > 0);
+        if (!is_join)
+        {
+            m_ctrlBranches[def_blk].insert(inst);
+        }
         for (BasicBlock::iterator I = def_blk->begin(), E = def_blk->end(); I != E; ++I)
         {
             Instruction* defi = &(*I);

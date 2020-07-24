@@ -901,29 +901,16 @@ ANode *ANode::getChildANode(ANode *parent)
 
 //  Preprocess CFG so that the structurizer can be simpler without considering
 /// those corner cases. Currently, it does:
-//  1) avoid sharing target label among forward gotos and backward gotos
+//  *) avoid sharing target label among forward gotos and backward gotos
 //     For example,
 //          goto L
 //       L:
 //          goto L
-//
-//     changed to
+//     to
 //           goto L0
 //       L0:
 //       L1:
 //           goto L1
-//  2) avoid a fall-thru BB of a backward goto BB is the target BB of another
-//     backward goto (two back-to-back loops). For example,
-//          L0:
-//            (p0) goto L0
-//          L1 :
-//            (p1) goto L1
-//    changed to
-//          L0:
-//            (p0) goto L0
-//          L :
-//          L1 :
-//            (p1) goto L1
 void CFGStructurizer::preProcess()
 {
     bool CFGChanged = false;
@@ -939,7 +926,6 @@ void CFGStructurizer::preProcess()
         // Check if this B is a successor of both backward and forward branches.
         bool isForwardTarget = false;
         bool isBackwardTarget = false;
-        bool isFallThruOfBackwardGotoBB = false;
         BB_LIST_ITER IT, IE;
         for (IT = B->Preds.begin(), IE = B->Preds.end(); IT != IE; IT++)
         {
@@ -951,30 +937,18 @@ void CFGStructurizer::preProcess()
             }
             // P is a BB before B
             G4_INST *gotoInst = getGotoInst(B);
-            G4_INST* gotoInstP = getGotoInst(P);
             if (gotoInst && P->getPhysicalSucc() != B)
             {
                 isForwardTarget = true;
             }
-            else if (gotoInstP
-                && P->getPhysicalSucc() == B
-                && gotoInstP->asCFInst()->isBackward())
-            {
-                isFallThruOfBackwardGotoBB = true;
-            }
         }
 
-        if (   !(isBackwardTarget && isForwardTarget)              // case 1
-            && !(isBackwardTarget && isFallThruOfBackwardGotoBB))  // case 2
+        if (!isBackwardTarget || !isForwardTarget)
         {
-            // not candidate
             continue;
         }
 
-        // "B" is the target of both forward and backward branching, or is the
-        // target of a backward branching and also the fall-thru of another
-        // backward goto BB.
-        //
+        // "B" is the target of both forward and backward branching.
         // Create an empty BB right before "B", and adjust all forward
         // branching to this new BB.
         G4_BB *newBB = createBBWithLabel();
@@ -993,7 +967,7 @@ void CFGStructurizer::preProcess()
                 // keep the backward branch unchanged.
                 continue;
             }
-            // forward branching/fall-thru P->B is changed to P->newBB
+            // P->B  changed to P->newBB
             BBListReplace(P->Succs, B, newBB);
             newBB->Preds.push_back(P);
 
@@ -1041,12 +1015,9 @@ void CFGStructurizer::init()
     // (Note that removeUnreachableBlocks() right before invoking this
     //  pass will reassign block IDs.)
 
-    // First, preprocess CFG so that the structurizer does not need to handle corner cases.
-    // Currently, it does:
-    //    1. no forward gotos and backward gotos share the same label (but allow that
-    //       all forward gotos can share the same label, so can all backward gotos);
-    //    2. No fall-thru BB of a backward goto BB is also the target BB of another
-    //       backward goto.
+    // First, preprocess CFG so that no forward gotos and backward gotos
+    // share the same label (all forward goto can share the same label,
+    // so can all backward gotos).
     preProcess();
 
     BBs = &(CFG->getBBList());
@@ -2899,7 +2870,7 @@ void CFGStructurizer::insertAtBegin(G4_BB* aBB, G4_INST *anInst)
     MUST_BE_TRUE((*I)->opcode() == G4_label,
                  "The 1st inst of BB must be a label inst");
     ++I;
-    aBB->insertBefore(I, anInst);
+    aBB->insert(I, anInst);
 }
 
 void CFGStructurizer::setJoinJIP(G4_BB* joinBB, G4_BB* jipBB)
@@ -2919,23 +2890,19 @@ void CFGStructurizer::setJoinJIP(G4_BB* joinBB, G4_BB* jipBB)
 void CFGStructurizer::convertChildren(ANodeHG *nodehg, G4_BB *nextJoinBB)
 {
     // JIP setting of Join instruction:
-    //   activeJoinBBs : a list of join BBs in the increasing order of BB layout,
-    //                   which are after the BB being processed currently.
+    //   to set JIP correctly, we use activeJoinBBs that keeps a list
+    //   of join BBs in the increasing order of BBs (in terms of BB layout
+    //   order). The join BB is the BB with join instruction as its first
+    //   instruction. With this list, a join's jip will be its next BB
+    //   in activeJoinBBs.
     //
-    //   The join BB is the BB with join instruction as its first instruction.
-    //   If the current BB is the first join BB (if exists) in acticveJoinBBs,
-    //   its JIP will be set to the 2nd join in activeJoinBBs. Once its JIP is
-    //   set, this BB is removed from activeJoinBBs.
-    //
-    //   activeJoinBBs keeps a list of join BBs whose jips needs to be set.
-    //   It works like this: for each child ANode, if its exit BB is a join BB,
-    //   add it into activeJoinBBs (we check if a BB is a join BB by checking
-    //   if the BB has join instruction in it). As conversion is done bottom-up,
-    //   all children must have been converted before their parents. This means
-    //   that a join should be inserted in a child's exit BB if that child does
-    //   need join. But that join's JIP is not known until the next join is found.
-    //   Adding unknown-JIP join into activeJoinBBs so that it will get set when
-    //   next next join is reached.
+    //   activeJoinBBs keeps a list of join BBs whose jips needs to be
+    //   set. It works like this, for each child ANode, if its exit is
+    //   join BB, add it into activeJoinBBs. We check if a BB is a join
+    //   BB by checking if the BB has join instruction in it (we will
+    //   convert the child first. If its exit is a join, a join will
+    //   be insert in its exit BB, but this join's jip is not known until
+    //   the next join is found). If so, add it into activeJoinBBs.
     //
     BB_LIST activeJoinBBs;
     if (nextJoinBB)
@@ -2945,7 +2912,7 @@ void CFGStructurizer::convertChildren(ANodeHG *nodehg, G4_BB *nextJoinBB)
         activeJoinBBs.push_back(nextJoinBB);
     }
 
-    // If nodehg is DO_WHILE, its end should have been processed in convertDoWhile()
+    // For DO_WHILE, its end should have been processed in convertDoWhile()
     // before invoking this function, hence, skip the end BB.
     ANList::iterator II = nodehg->children.begin();
     ANList::iterator IE = nodehg->children.end();
@@ -3527,10 +3494,11 @@ void CFGStructurizer::generateGotoJoin(G4_BB *gotoBB, G4_BB *jibBB, G4_BB *joinB
             G4_INST *predInst = CFG->builder->createMov(1,
                 newPredDef,
                 CFG->builder->createImm(0, Type_UW),
-                InstOpt_WriteEnable, false);
+                InstOpt_WriteEnable, false, gotoInst->getLineNo(),
+                gotoInst->getCISAOff(), gotoInst->getSrcFilename());
             INST_LIST_ITER iter = gotoBB->end();
             iter--;
-            gotoBB->insertBefore(iter, predInst);
+            gotoBB->insert(iter, predInst);
 
             pred = CFG->builder->createPredicate(
                 PredState_Plus,

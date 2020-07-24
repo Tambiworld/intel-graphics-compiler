@@ -199,14 +199,10 @@ uint8_t ZEBinaryBuilder::getSymbolElfType(vISA::ZESymEntry& sym)
     switch (sym.s_type) {
     case vISA::GenSymType::S_NOTYPE:
         return llvm::ELF::STT_NOTYPE;
-
     case vISA::GenSymType::S_UNDEF:
         return llvm::ELF::STT_NOTYPE;
-
     case vISA::GenSymType::S_FUNC:
-    case vISA::GenSymType::S_KERNEL:
         return llvm::ELF::STT_FUNC;
-
     case vISA::GenSymType::S_GLOBAL_VAR:
     case vISA::GenSymType::S_GLOBAL_VAR_CONST:
     case vISA::GenSymType::S_CONST_SAMPLER:
@@ -222,9 +218,6 @@ uint8_t ZEBinaryBuilder::getSymbolElfBinding(vISA::ZESymEntry& sym)
     // all symbols we have now that could be exposed must have
     // global binding
     switch (sym.s_type) {
-    case vISA::GenSymType::S_KERNEL:
-        return llvm::ELF::STB_LOCAL;
-
     case vISA::GenSymType::S_NOTYPE:
     case vISA::GenSymType::S_UNDEF:
     case vISA::GenSymType::S_FUNC:
@@ -254,31 +247,27 @@ void ZEBinaryBuilder::addSymbols(
     } (annotations.m_executionEnivronment.CompiledSIMDSize,
         annotations.m_kernelProgram);
 
-    // add local symbols of this kernel binary
-    for (auto sym : symbols.local) {
-        IGC_ASSERT(sym.s_type != vISA::GenSymType::S_UNDEF);
-        mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
-            getSymbolElfBinding(sym), getSymbolElfType(sym), kernelSectId);
-    }
-
     // If the symbol has UNDEF type, set its sectionId to -1
     // add function symbols defined in kernel text
-    for (auto sym : symbols.function)
-        mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
-            getSymbolElfBinding(sym), getSymbolElfType(sym),
-            (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : kernelSectId);
+    if (!symbols.function.empty())
+        for (auto sym : symbols.function)
+            mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
+                getSymbolElfBinding(sym), getSymbolElfType(sym),
+                (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : kernelSectId);
 
     // add symbols defined in global constant section
-    for (auto sym : symbols.globalConst)
-        mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
-            getSymbolElfBinding(sym), getSymbolElfType(sym),
-            (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : mGlobalConstSectID);
+    if (!symbols.globalConst.empty())
+        for (auto sym : symbols.globalConst)
+            mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
+                getSymbolElfBinding(sym), getSymbolElfType(sym),
+                (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : mGlobalConstSectID);
 
     // add symbols defined in global section
-    for (auto sym : symbols.global)
-        mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
-            getSymbolElfBinding(sym), getSymbolElfType(sym),
-            (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : mGlobalSectID);
+    if (!symbols.global.empty())
+        for (auto sym : symbols.global)
+            mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
+                getSymbolElfBinding(sym), getSymbolElfType(sym),
+                (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : mGlobalSectID);
 
     // we do not support sampler symbols now
     IGC_ASSERT(symbols.sampler.empty());
@@ -353,18 +342,18 @@ void ZEBinaryBuilder::addLocalIds(uint32_t simdSize, uint32_t grfSize,
     // simdSize 1 is CM kernel, using arg_type::packed_local_ids format
     if (simdSize == 1) {
         // Currently there's only one kind of per-thread argument, hard-coded the
-        // offset to 0 and for packed_local_ids, its size is 6 bytes (int16*3) always
+        // offset to 0 and for packed_local_ids, its size is 96 (int32*3) always
         mZEInfoBuilder.addPerThreadPayloadArgument(
             zeinfoKernel.per_thread_payload_arguments,
-            PreDefinedAttrGetter::ArgType::packed_local_ids, 0, 6);
+            PreDefinedAttrGetter::ArgType::packed_local_ids, 0, 96);
         return;
     }
     // otherwise, using arg_type::local_id format
+    // byte size for one id, have to be grf align
     IGC_ASSERT(simdSize);
     IGC_ASSERT(grfSize);
     // each id takes 2 bytes
     int32_t per_id_size = 2 * simdSize;
-    // byte size for one id have to be grf align
     per_id_size = (per_id_size % grfSize) == 0 ?
         per_id_size : (per_id_size / grfSize) + 1;
     // total_size = num_of_ids * per_id_size

@@ -35,9 +35,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "igcmc.h"
 #include "Compiler/CodeGenPublic.h"
-#include "common/LLVMWarningsPush.hpp"
-#include "VectorCompiler/include/vc/GenXCodeGen/GenXWrapper.h"
-#include "common/LLVMWarningsPop.hpp"
 
 namespace iOpenCL {
   class CGen8CMProgram;
@@ -55,7 +52,6 @@ public:
     IGC::SOpenCLKernelInfo m_kernelInfo;
     IGC::SProgramOutput m_prog;
     IGC::COCLBTILayout m_btiLayout;
-    uint32_t m_GRFSizeInBytes;
 
     // General argument
     void createConstArgumentAnnotation(unsigned argNo,
@@ -69,18 +65,20 @@ public:
                                 bool isWriteable);
 
     // add a pointer patch token.
-    void createPointerGlobalAnnotation(const cmc_arg_info &argInfo);
+    void createPointerGlobalAnnotation(unsigned argNo,
+                                       unsigned byteSize,
+                                       unsigned payloadPosition,
+                                       int BTI);
 
     void createPrivateBaseAnnotation(unsigned argNo, unsigned byteSize,
                                      unsigned payloadPosition, int BTI,
                                      unsigned statelessPrivateMemSize);
 
     // add a stateful buffer patch token.
-    void createBufferStatefulAnnotation(unsigned argNo,
-                                        cmc_access_kind accessKind);
+    void createBufferStatefulAnnotation(unsigned argNo);
 
     // Local or global size
-    void createSizeAnnotation(unsigned payloadPosition, iOpenCL::DATA_PARAMETER_TOKEN type);
+    void createSizeAnnotation(unsigned payloadPosition, int32_t type);
 
     // Global work offset/local work size
     void createImplicitArgumentsAnnotation(unsigned payloadPosition);
@@ -113,8 +111,3 @@ extern int vISACompile_v2(cmc_compile_info_v2 *output,
 extern const char* getPlatformStr(PLATFORM platform);
 
 } // namespace cmc
-
-namespace vc {
-void createBinary(iOpenCL::CGen8CMProgram &CMProgram,
-                  const std::vector<vc::ocl::CompileInfo> &CompileInfos);
-} // namespace vc

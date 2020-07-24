@@ -62,8 +62,8 @@ CISA_IR_Builder::~CISA_IR_Builder()
 {
     m_cisaBinary->~CisaBinary();
 
-    std::list<VISAKernelImpl *>::iterator iter_start = m_kernelsAndFunctions.begin();
-    std::list<VISAKernelImpl *>::iterator iter_end = m_kernelsAndFunctions.end();
+    std::list<VISAKernelImpl *>::iterator iter_start = m_kernels.begin();
+    std::list<VISAKernelImpl *>::iterator iter_end = m_kernels.end();
 
     while (iter_start != iter_end)
     {
@@ -363,7 +363,7 @@ int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
     m_kernel = kerneltemp;
     //m_kernel->setName(kernelName);
     m_kernel->setIsKernel(true);
-    m_kernelsAndFunctions.push_back(kerneltemp);
+    m_kernels.push_back(kerneltemp);
     m_kernel->setVersion((unsigned char)this->m_header.major_version, (unsigned char)this->m_header.minor_version);
     m_kernel->InitializeKernel(kernelName);
     m_kernel->SetGTPinInit(getGtpinInit());
@@ -393,6 +393,7 @@ int CISA_IR_Builder::AddFunction(VISAFunction *& function, const char* functionN
     this->m_kernel_count--;
     this->m_function_count++;
     ((VISAKernelImpl *)function)->setIsKernel(false);
+    m_functionsVector.push_back(function);
     return VISA_SUCCESS;
 }
 
@@ -484,7 +485,7 @@ void restoreFCallState(G4_Kernel* kernel, SavedFCallStates savedFCallState)
 
                     G4_INST* retToReplace = retbbToConvert->back();
 
-                    retToReplace->asCFInst()->retToFRet();
+                    retToReplace->setOpcode( G4_pseudo_fret );
                     retToReplace->setDest(NULL);
 
                     kernel->fg.removePredSuccEdges(retbbToConvert, retBlock);
@@ -506,7 +507,7 @@ void restoreFCallState(G4_Kernel* kernel, SavedFCallStates savedFCallState)
                     // Restore edge to retBlock
                     kernel->fg.addPredSuccEdges( curBB, (*state_it).second.retBlock );
 
-                    instToReplace->asCFInst()->callToFCall();
+                    instToReplace->setOpcode( G4_pseudo_fcall );
                 }
             }
         }
@@ -516,7 +517,7 @@ void restoreFCallState(G4_Kernel* kernel, SavedFCallStates savedFCallState)
     {
         G4_INST* retToReplace = retBB->back();
 
-        retToReplace->asCFInst()->retToFRet();
+        retToReplace->setOpcode(G4_pseudo_fret);
         retToReplace->setDest(NULL);
 
     }
@@ -529,46 +530,45 @@ void restoreFCallState(G4_Kernel* kernel, SavedFCallStates savedFCallState)
     }
 }
 
-// Stitch the FG of subFunctions to mainFunc
-// mainFunc could be a kernel or a non-kernel function.
-// It also modifies pseudo_fcall/fret in to call/ret opcodes.
-// ToDo: may consider stitching only functions that may be called by this kernel/function
-static void Stitch_Compiled_Units(G4_Kernel* mainFunc, std::map<std::string, G4_Kernel*>& subFuncs)
+// Stitch the Gen binary for all functions in this vISA program with the given kernel
+// It modifies pseudo_fcall/fret in to call/ret opcodes.
+// ToDo: may consider stitching only functions that may be called by this kernel
+static void Stitch_Compiled_Units(G4_Kernel* kernel, std::map<std::string, G4_Kernel*>& compilation_units)
 {
 
-    // Append subFunctions to mainFunc
-    for (auto&& iter : subFuncs)
+    // Append flowgraph of all callees to kernel. For now just assume all functions in the modules
+    // may be called
+    for (auto&& iter : compilation_units)
     {
         G4_Kernel* callee = iter.second;
-        mainFunc->fg.append(callee->fg);
+        kernel->fg.append(callee->fg);
 
         // merge the relocation when append
         if (!callee->getRelocationTable().empty())
-            mainFunc->getRelocationTable().insert(mainFunc->getRelocationTable().end(),
+            kernel->getRelocationTable().insert(kernel->getRelocationTable().end(),
                 callee->getRelocationTable().begin(), callee->getRelocationTable().end());
     }
 
-    mainFunc->fg.reassignBlockIDs();
+    kernel->fg.reassignBlockIDs();
 
     // Change fcall/fret to call/ret and setup caller/callee edges
-    for (G4_BB* cur : mainFunc->fg)
+    for (G4_BB* cur : kernel->fg)
     {
         if (cur->size() > 0 && cur->isEndWithFCall())
         {
             // Setup successor/predecessor
             G4_INST* fcall = cur->back();
-            if (mainFunc->getOption(vISA_GenerateDebugInfo))
+            if (kernel->getOption(vISA_GenerateDebugInfo))
             {
-                mainFunc->getKernelDebugInfo()->setFCallInst(fcall);
+                kernel->getKernelDebugInfo()->setFCallInst(fcall);
             }
 
             if (!fcall->asCFInst()->isIndirectCall())
             {
-                // Setup caller/callee edges for direct call
                 std::string funcName = fcall->getSrc(0)->asLabel()->getLabel();
 
-                auto iter = subFuncs.find(funcName);
-                assert(iter != subFuncs.end() && "can't find function with given name");
+                auto iter = compilation_units.find(funcName);
+                assert(iter != compilation_units.end() && "can't find function with given name");
                 G4_Kernel* callee = iter->second;
                 G4_BB* retBlock = cur->Succs.front();
                 ASSERT_USER(cur->Succs.size() == 1, "fcall basic block cannot have more than 1 successor");
@@ -579,8 +579,8 @@ static void Stitch_Compiled_Units(G4_Kernel* mainFunc, std::map<std::string, G4_
                 cur->Succs.erase(cur->Succs.begin());
 
                 // Connect new fg
-                mainFunc->fg.addPredSuccEdges(cur, callee->fg.getEntryBB());
-                mainFunc->fg.addPredSuccEdges(callee->fg.getUniqueReturnBlock(), retBlock);
+                kernel->fg.addPredSuccEdges(cur, callee->fg.getEntryBB());
+                kernel->fg.addPredSuccEdges(callee->fg.getUniqueReturnBlock(), retBlock);
 
                 G4_INST* calleeLabel = callee->fg.getEntryBB()->front();
                 ASSERT_USER(calleeLabel->isLabel() == true, "Entry inst is not label");
@@ -590,34 +590,35 @@ static void Stitch_Compiled_Units(G4_Kernel* mainFunc, std::map<std::string, G4_
 
                 // dst label
                 fcall->setSrc(calleeLabel->getSrc(0), 0);
-                fcall->asCFInst()->pseudoCallToCall();
+                fcall->setOpcode(G4_call);
             }
             else
             {
                 fcall->setSrc(fcall->getSrc(0), 1);
-                fcall->asCFInst()->pseudoCallToCall();
+                fcall->setOpcode(G4_call);
             }
         }
     }
 
     // Change fret to ret
-    for (G4_BB* cur : mainFunc->fg)
+    for (G4_BB* cur : kernel->fg)
     {
         if( cur->size() > 0 && cur->isEndWithFRet() )
         {
             G4_INST* fret = cur->back();
-            fret->asCFInst()->pseudoRetToRet();
-            fret->setDest( mainFunc->fg.builder->createNullDst(Type_UD) );
+            ASSERT_USER( fret->opcode() == G4_pseudo_fret, "Expecting to see pseudo_fret");
+            fret->setOpcode( G4_return );
+            fret->setDest( kernel->fg.builder->createNullDst(Type_UD) );
         }
     }
 
-    // Append declarations and color attributes from all callees to mainFunc
-    for (auto iter : subFuncs)
+    // Append declarations and color attributes from all callees to kernel
+    for (auto iter : compilation_units)
     {
         G4_Kernel* callee = iter.second;
         for (auto curDcl : callee->Declares)
         {
-            mainFunc->Declares.push_back(curDcl);
+            kernel->Declares.push_back(curDcl);
         }
     }
 }
@@ -697,15 +698,7 @@ int CISA_IR_Builder::ParseVISAText(const std::string& visaHeader, const std::str
         YY_BUFFER_STATE visaBuf = CISA_scan_string(visaText.c_str());
         if (CISAparse(this) != 0)
         {
-#if defined(_DEBUG) || defined(_INTERNAL)
-            // how do we detect offline IGCBuild?
-            std::cerr << "Parsing visa text failed.";
-            if (!visaTextFile.empty())
-            {
-                std::cerr << " Please examine " << visaTextFile << " and fix the error";
-            }
-            std::cerr << "\n" << criticalMsg.str();
-#endif
+            assert(0 && "Parsing visa text failed");
             return VISA_FAILURE;
         }
         CISA_delete_buffer(visaBuf);
@@ -775,6 +768,11 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
             assert(0 && "Should not be calling Compile() in asm text writter mode!");
             return VISA_FAILURE;
         }
+
+        std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
+        std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
+        CBinaryCISAEmitter cisaBinaryEmitter;
+        int kernelIndex = 0;
         if ( IS_BOTH_PATH )
         {
             m_options.setOptionInternally(vISA_NumGenBinariesWillBePatched, (uint32_t) 1);
@@ -784,16 +782,14 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         m_cisaBinary->setMinorVersion((unsigned char)this->m_header.minor_version);
         m_cisaBinary->setMagicNumber(COMMON_ISA_MAGIC_NUM);
 
-        CBinaryCISAEmitter cisaBinaryEmitter;
         int status = VISA_SUCCESS;
-        int kernelIndex = 0;
-        for(auto func : m_kernelsAndFunctions)
+        for( ; iter != end; iter++, kernelIndex++ )
         {
-            func->finalizeAttributes();
+            VISAKernelImpl * kTemp = *iter;
+            kTemp->finalizeAttributes();
             unsigned int binarySize = 0;
-            status = cisaBinaryEmitter.Emit(func, binarySize);
-            m_cisaBinary->initKernel(kernelIndex, func);
-            kernelIndex++;
+            status = cisaBinaryEmitter.Emit(kTemp, binarySize);
+            m_cisaBinary->initKernel(kernelIndex, kTemp);
         }
         m_cisaBinary->finalizeCisaBinary();
 
@@ -805,7 +801,7 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         // We call the verifier and dumper directly.
         if (m_options.getOption(vISA_GenerateISAASM) || !m_options.getOption(vISA_NoVerifyvISA))
         {
-            m_cisaBinary->isaDumpVerify(m_kernelsAndFunctions, &m_options);
+            m_cisaBinary->isaDumpVerify(m_kernels, &m_options);
         }
     }
 
@@ -827,8 +823,10 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         Mem_Manager mem(4096);
         common_isa_header pseudoHeader;
         // m_kernels contains kernels and functions to compile.
-        std::list<VISAKernelImpl*>::iterator iter = m_kernelsAndFunctions.begin();
-        std::list<VISAKernelImpl*>::iterator end = m_kernelsAndFunctions.end();
+        std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
+        std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
+        iter = m_kernels.begin();
+        end = m_kernels.end();
 
         pseudoHeader.num_kernels = 0;
         pseudoHeader.num_functions = 0;
@@ -848,7 +846,9 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
 
         int i;
         unsigned int k = 0;
-        for( iter = m_kernelsAndFunctions.begin(), i = 0; iter != end; iter++, i++ )
+        std::list<VISAKernelImpl*> kernels;
+        std::list<VISAKernelImpl*> functions;
+        for( iter = m_kernels.begin(), i = 0; iter != end; iter++, i++ )
         {
             VISAKernelImpl* kernel = (*iter);
             kernel->finalizeAttributes();
@@ -866,6 +866,11 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
 
                 strcpy_s((char*)&pseudoHeader.functions[k].name, COMMON_ISA_MAX_FILENAME_LENGTH, (*iter)->getKernel()->getName());
                 k++;
+                functions.push_back(kernel);
+            }
+            else
+            {
+                kernels.push_back(kernel);
             }
 
             int status =  kernel->compileFastPath();
@@ -877,77 +882,55 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         }
 
         SavedFCallStates savedFCallState;
-        for(auto func : m_kernelsAndFunctions)
+
+        for(std::list<VISAKernelImpl*>::iterator kernel_it = kernels.begin(), kend = kernels.end();
+            kernel_it != kend;
+            kernel_it++)
         {
-            saveFCallState(func->getKernel(), savedFCallState);
+            VISAKernelImpl* kernel = (*kernel_it);
+
+            saveFCallState(kernel->getKernel(), savedFCallState);
         }
 
-        // Preparing for stitching some functions to other functions
-        // There are two stiching policies:
-        // 1. vISA_noStitchExternFunc == false
-        //    Stitch all non-kernel functions to all kernels
-        // 2. vISA_noStitchExternFunc == true
-        //    Stitch only non-external functions. Stich them to all kernels and external functions
-
-        // mainFunctions: functions or kernels those will be stiched by others
-        // Thses functions/kernels will be the unit of compilePostOptimize
-        VISAKernelImpl::VISAKernelImplListTy mainFunctions;
-        // subFunctions: functions those will stitch to others
-        VISAKernelImpl::VISAKernelImplListTy subFunctions;
-        std::map<std::string, G4_Kernel*> subFunctionsNameMap;
-        // For functions those will be stitch to others, create table to map their name to G4_Kernel
-        for (auto func : m_kernelsAndFunctions)
+        for( std::list<VISAKernelImpl*>::iterator func_it = functions.begin(), fend = functions.end();
+            func_it != fend;
+            func_it++ )
         {
-            if (func->getIsKernel()) {
-                // kernels must be stitched
-                mainFunctions.push_back(func);
-                continue;
-            } else {
-                if (!m_options.getOption(vISA_noStitchExternFunc)) {
-                    // Policy 1: all fnunctions will stitch to kernels
-                    subFunctions.push_back(func);
-                    subFunctionsNameMap[std::string(func->getName())] = func->getKernel();
-                } else {
-                    // Policy 2: external functions will be stitched, non-external functions will stitch to others
-                    if (func->getKernel()->getIntKernelAttribute(Attributes::ATTR_Extern) != 0)
-                    {
-                        mainFunctions.push_back(func);
-                    }
-                    else
-                    {
-                        subFunctions.push_back(func);
-                        subFunctionsNameMap[std::string(func->getName())] = func->getKernel();
-                    }
-                }
-            }
+            VISAKernelImpl* function = (*func_it);
+
+            saveFCallState( function->getKernel(), savedFCallState );
         }
 
-        // reset debug info offset of functionsToStitch
-        for (auto func : subFunctions)
+        std::map<std::string, G4_Kernel*> allFunctions;
+
+        for (auto func_it = functions.begin(); func_it != functions.end(); func_it++)
         {
+            G4_Kernel* func = (*func_it)->getKernel();
+            allFunctions[std::string(func->getName())] = func;
             if (m_options.getOption(vISA_GenerateDebugInfo))
             {
-                func->getKernel()->getKernelDebugInfo()->resetRelocOffset();
-                resetGenOffsets(*func->getKernel());
+                func->getKernelDebugInfo()->resetRelocOffset();
+                resetGenOffsets(*func);
             }
         }
 
-        // stitch functions and compile to gen binary
-        for (auto func : mainFunctions)
+        for (auto kernel_it = kernels.begin(); kernel_it != kernels.end(); kernel_it++ )
         {
+            VISAKernelImpl* kernel = (*kernel_it);
+
             unsigned int genxBufferSize = 0;
 
-            Stitch_Compiled_Units(func->getKernel(), subFunctionsNameMap);
+            Stitch_Compiled_Units(kernel->getKernel(), allFunctions);
 
-            void* genxBuffer = func->compilePostOptimize(genxBufferSize);
-            func->setGenxBinaryBuffer(genxBuffer, genxBufferSize);
+            void* genxBuffer = kernel->compilePostOptimize(genxBufferSize);
+            kernel->setGenxBinaryBuffer(genxBuffer, genxBufferSize);
 
             if(m_options.getOption(vISA_GenerateDebugInfo))
             {
-                func->computeAndEmitDebugInfo(subFunctions);
+                kernel->computeAndEmitDebugInfo(functions);
             }
 
-            restoreFCallState(func->getKernel(), savedFCallState);
+            restoreFCallState( kernel->getKernel(), savedFCallState );
 
 
         }
@@ -961,31 +944,37 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
 
         if (numGenBinariesWillBePatched)
         {
-            //only patch for Both path; vISA path doesn't need this.
+            std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
+            std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
+
             int kernelCount = 0;
             int functionCount = 0;
-            for (auto func : m_kernelsAndFunctions)
+
+            //only patch for Both path; vISA path doesn't need this.
+            for (int i = 0; iter != end; iter++, i++)
             {
-                if (func->getIsKernel())
+                VISAKernelImpl * kTemp = *iter;
+                void * genxBuffer = NULL;
+                unsigned int genxBufferSize = 0;
+                if (kTemp->getIsKernel())
                 {
-                    m_cisaBinary->patchKernel(
-                        kernelCount, func->getGenxBinarySize(), func->getGenxBinaryBuffer(), getGenxPlatformEncoding());
+                    genxBuffer = kTemp->getGenxBinaryBuffer();
+                    genxBufferSize = kTemp->getGenxBinarySize();
+                    m_cisaBinary->patchKernel(kernelCount, genxBufferSize, genxBuffer, getGenxPlatformEncoding());
                     kernelCount++;
-                } else {
-                    // functions be treated as "mainFunctions" will have its own binary, will need to
-                    // specify its binary buffer in m_cisaBinary
-                    // FIXME: By this the external functions' gen-binary will be part of .isa output when
-                    // calling CisaBinary::dumpToStream, and avoid the assert in dumpToStream. But when
-                    // parsing the emited .isa file, our parser may not correctly support this case.
-                    if (m_options.getOption(vISA_noStitchExternFunc) &&
-                        func->getKernel()->getIntKernelAttribute(Attributes::ATTR_Extern) != 0) {
-                        m_cisaBinary->patchFunctionWithGenBinary(functionCount, func->getGenxBinarySize(),
-                            func->getGenxBinaryBuffer());
-                    } else {
-                        m_cisaBinary->patchFunction(functionCount, func->getGenxBinarySize());
-                    }
-                    functionCount++;
                 }
+            }
+            iter = m_kernels.begin();
+            for (int i = 0; iter != end; iter++, i++)
+            {
+              VISAKernelImpl * kTemp = *iter;
+              unsigned int genxBufferSize = 0;
+              if (!kTemp->getIsKernel())
+              {
+                genxBufferSize = kTemp->getGenxBinarySize();
+                m_cisaBinary->patchFunction(functionCount, genxBufferSize);
+                functionCount++;
+              }
             }
         }
 
@@ -1324,10 +1313,11 @@ bool CISA_IR_Builder::CISA_create_mov_instruction(VISA_opnd *pred,
 }
 
 bool CISA_IR_Builder::CISA_create_mov_instruction(
-    VISA_opnd* dst, CISA_GEN_VAR* src0, int line_no)
+    VISA_opnd *dst, const char *src0_name, int line_no)
 {
+    CISA_GEN_VAR *src0 = m_kernel->getDeclFromName(src0_name);
     MUST_BE_TRUE1(src0 != NULL, line_no, "The source operand of a move instruction was null");
-    m_kernel->AppendVISAPredicateMove((VISA_VectorOpnd*)dst, (VISA_PredVar*)src0);
+    m_kernel->AppendVISAPredicateMove((VISA_VectorOpnd *)dst, (VISA_PredVar  *)src0);
     return true;
 }
 
@@ -1414,14 +1404,16 @@ bool CISA_IR_Builder::CISA_create_branch_instruction(VISA_opnd *pred,
 
 bool CISA_IR_Builder::CISA_create_cmp_instruction(
     VISA_Cond_Mod sub_op,
+    ISA_Opcode opcode,
     VISA_EMask_Ctrl emask,
     unsigned exec_size,
-    CISA_GEN_VAR *decl,
+    const char *name,
     VISA_opnd *src0,
     VISA_opnd *src1,
     int line_no)
 {
     VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
+    CISA_GEN_VAR * decl = m_kernel->getDeclFromName(std::string(name));
     m_kernel->AppendVISAComparisonInst(
         sub_op, emask, executionSize,
         (VISA_PredVar *)decl, (VISA_VectorOpnd *)src0, (VISA_VectorOpnd *)src1);
@@ -1695,9 +1687,9 @@ bool CISA_IR_Builder::CISA_create_logic_instruction(
     ISA_Opcode opcode,
     VISA_EMask_Ctrl emask,
     unsigned exec_size,
-    CISA_GEN_VAR *dst,
-    CISA_GEN_VAR *src0,
-    CISA_GEN_VAR *src1,
+    const char *dst_name,
+    const char *src0_name,
+    const char *src1_name,
     int line_no)
 {
     if( opcode != ISA_AND &&
@@ -1708,11 +1700,15 @@ bool CISA_IR_Builder::CISA_create_logic_instruction(
         MUST_BE_TRUE1(false, line_no, "Prediate variables are not supported for this Logic Opcode." );
     }
     VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
-    MUST_BE_TRUE1(dst, line_no, "The destination operand of a logical instruction was null");
-    MUST_BE_TRUE1(src0, line_no, "The first source operand of a logical instruction was null");
+    CISA_GEN_VAR *dst = m_kernel->getDeclFromName(dst_name);
+    MUST_BE_TRUE1(dst != NULL, line_no, "The destination operand of a logical instruction was null");
+    CISA_GEN_VAR *src0 = m_kernel->getDeclFromName(src0_name);
+    MUST_BE_TRUE1(src0 != NULL, line_no, "The first source operand of a logical instruction was null");
+    CISA_GEN_VAR *src1 = NULL;
     if ( opcode != ISA_NOT )
     {
-        MUST_BE_TRUE1(src1, line_no, "The second source operand of a logical instruction was null");
+        src1 = m_kernel->getDeclFromName(src1_name);
+        MUST_BE_TRUE1(src1 != NULL, line_no, "The second source operand of a logical instruction was null");
     }
     m_kernel->AppendVISALogicOrShiftInst(
         opcode, emask, executionSize,
@@ -1742,11 +1738,12 @@ bool CISA_IR_Builder::CISA_create_setp_instruction(
     ISA_Opcode opcode,
     VISA_EMask_Ctrl emask,
     unsigned exec_size,
-    CISA_GEN_VAR * dst,
+    const char * var_name,
     VISA_opnd *src0,
     int line_no)
 {
     VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
+    CISA_GEN_VAR *dst = m_kernel->getDeclFromName(var_name);
     m_kernel->AppendVISASetP(emask, executionSize, (VISA_PredVar *)dst, (VISA_VectorOpnd *)src0);
     return true;
 }
@@ -2232,11 +2229,6 @@ bool CISA_IR_Builder::CISA_create_rtwrite_3d_instruction(
         {
             cntrls.isCoarseMode = true;
         }
-
-        if (strstr(mode, "NULLRT"))
-        {
-            cntrls.isNullRT = true;
-        }
     }
     else
     {
@@ -2691,7 +2683,7 @@ bool CISA_IR_Builder::CISA_create_lifetime_inst(
     else if(cisaVar->type == PREDICATE_VAR)
     {
         char cntrl[4] = {0, 0, 0, 0};
-        var = CISA_create_predicate_operand(cisaVar, PredState_NO_INVERSE, cntrl, line_no);
+        var = CISA_create_predicate_operand(src, MODIFIER_NONE, PredState_NO_INVERSE, cntrl, line_no);
     }
     m_kernel->AppendVISALifetime((VISAVarLifetime)startOrEnd, (VISA_VectorOpnd*)var);
 
@@ -2922,7 +2914,7 @@ VISA_opnd * CISA_IR_Builder::CISA_create_state_operand(
 }
 
 VISA_opnd * CISA_IR_Builder::CISA_create_predicate_operand(
-    CISA_GEN_VAR *decl, VISA_PREDICATE_STATE state,
+    const char * var_name, VISA_Modifier mod, VISA_PREDICATE_STATE state,
     const char * cntrl, int line_no)
 {
 
@@ -2935,7 +2927,8 @@ VISA_opnd * CISA_IR_Builder::CISA_create_predicate_operand(
     {
         control = PRED_CTRL_ALL;
     }
-    VISA_PredOpnd *cisa_opnd = nullptr;
+    VISA_PredOpnd *cisa_opnd = NULL;
+    CISA_GEN_VAR * decl = m_kernel->getDeclFromName(std::string(var_name));
     int status = VISA_SUCCESS;
     m_kernel->CreateVISAPredicateOperand(cisa_opnd, (VISA_PredVar *)decl, state, control);
     MUST_BE_TRUE1((status == VISA_SUCCESS), line_no, "Failed to create predicate operand.");
@@ -3076,9 +3069,4 @@ std::stringstream& IR_Builder::criticalMsgStream()
 {
     return const_cast<CISA_IR_Builder*>(parentBuilder)->criticalMsgStream();
 }
-
-
-
-
-
 

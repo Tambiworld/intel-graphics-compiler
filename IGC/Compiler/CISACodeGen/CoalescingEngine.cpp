@@ -200,8 +200,7 @@ namespace IGC
                 {
                     GenISAIntrinsic::ID IID = intrinsic->getIntrinsicID();
                     if ((isURBWriteIntrinsic(intrinsic) && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_URB))) ||
-                        (IID == GenISAIntrinsic::GenISA_RTWrite && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))) ||
-                        (IID == GenISAIntrinsic::GenISA_RTDualBlendSource && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))))
+                        (IID == GenISAIntrinsic::GenISA_RTWrite && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))))
                     {
                         ProcessTuple(DefMI);
                     }
@@ -1210,7 +1209,7 @@ namespace IGC
         else
         {
             payload = outProgram->GetNewVariable(
-                numOperands * numLanes(simdMode), ISA_TYPE_F, outProgram->GetContext()->platform.getGRFSize() == 64 ? EALIGN_32WORD : EALIGN_HWORD, CName::NONE);
+                numOperands * numLanes(simdMode), ISA_TYPE_F, EALIGN_GRF, CName::NONE);
 
             for (uint i = 0; i < numOperands; i++)
             {
@@ -1314,8 +1313,7 @@ namespace IGC
         if (isSampleInstruction(inst) ||
             isLdInstruction(inst) ||
             isURBWriteIntrinsic(inst) ||
-            IID == GenISAIntrinsic::GenISA_RTWrite ||
-            IID == GenISAIntrinsic::GenISA_RTDualBlendSource)
+            IID == GenISAIntrinsic::GenISA_RTWrite)
         {
             uint numOperands = inst->getNumOperands();
             for (uint i = 0; i < numOperands; i++)

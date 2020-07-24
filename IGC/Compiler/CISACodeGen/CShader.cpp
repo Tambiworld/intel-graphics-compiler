@@ -99,8 +99,7 @@ void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatc
     m_DBG = nullptr;
     m_HW_TID = nullptr;
     m_SP = nullptr;
-    m_FP = nullptr;
-    m_SavedFP = nullptr;
+    m_SavedSP = nullptr;
     m_ARGV = nullptr;
     m_RETV = nullptr;
 
@@ -167,7 +166,7 @@ void CShader::EOTURBWrite()
     CVariable* pEOTPayload =
         GetNewVariable(
             messageLength * numLanes(SIMDMode::SIMD8),
-            ISA_TYPE_D, EALIGN_GRF, false, 1, "EOTPayload");
+            ISA_TYPE_D, IGC::EALIGN_GRF, false, 1, "EOTPayload");
 
     CVariable* zero = ImmToVariable(0x0, ISA_TYPE_D);
     // write at handle 0
@@ -248,9 +247,6 @@ CVariable* CShader::CreateSP()
     // create stack-pointer register
     m_SP = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1, "SP");
     encoder.GetVISAPredefinedVar(m_SP, PREDEFINED_FE_SP);
-    // create frame-pointer register
-    m_FP = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1, "FP");
-    encoder.GetVISAPredefinedVar(m_FP, PREDEFINED_FE_FP);
 
     return m_SP;
 }
@@ -273,26 +269,108 @@ uint32_t CShader::GetMaxPrivateMem()
     return MaxPrivateSize;
 }
 
-/// save FP of previous frame when entering a stack-call function
-void CShader::SaveStackState()
+/// initial stack-pointer at the beginning of the kernel
+void CShader::InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize)
 {
-    IGC_ASSERT(!m_SavedFP && m_FP && m_SP);
-    m_SavedFP = GetNewVariable(m_FP);
-    encoder.Copy(m_SavedFP, m_FP);
+    CreateSP();
+    ImplicitArgs implicitArgs(*entry, m_pMdUtils);
+    unsigned numPushArgs = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
+    unsigned numImplicitArgs = implicitArgs.size();
+    unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
+
+    Argument* kerArg = nullptr;
+    llvm::Function::arg_iterator arg = entry->arg_begin();
+    for (unsigned i = 0; i < numFuncArgs; ++i, ++arg);
+    for (unsigned i = 0; i < numImplicitArgs; ++i, ++arg) {
+        ImplicitArg implicitArg = implicitArgs[i];
+        if (implicitArg.getArgType() == ImplicitArg::ArgType::PRIVATE_BASE)
+        {
+            kerArg = (&*arg);
+            break;
+        }
+    }
+    IGC_ASSERT(kerArg);
+
+    CVariable* pHWTID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, "HWTID");
+    encoder.SetSrcRegion(0, 0, 1, 0);
+    encoder.SetSrcSubReg(0, 5);
+    encoder.And(pHWTID, GetR0(), ImmToVariable(0x1ff, ISA_TYPE_UD));
+    encoder.Push();
+
+    CVariable* pSize = nullptr;
+
+    // Maximun private size in byte, per-workitem
+    // When there's stack call, we don't know the actual stack size being used,
+    // so set a conservative max stack size.
+    uint32_t MaxPrivateSize = GetMaxPrivateMem();
+    if (IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+    {
+        // Experimental: Patch private memory size
+        std::string patchName = "INTEL_PATCH_PRIVATE_MEMORY_SIZE";
+        pSize = GetNewVariable(1, ISA_TYPE_UD, CVariable::getAlignment(getGRFSize()), true, CName(patchName));
+        encoder.AddVISASymbol(patchName, pSize);
+    }
+    else
+    {
+        // hard-code per-workitem private-memory size to max size
+        pSize = ImmToVariable(MaxPrivateSize * numLanes(m_dispatchSize), ISA_TYPE_UD);
+    }
+
+    CVariable* pTemp = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, CName::NONE);
+    encoder.Mul(pTemp, pHWTID, pSize);
+    encoder.Push();
+
+    // reserve space for alloca
+    auto funcMDItr = m_ModuleMetadata->FuncMD.find(entry);
+    if (funcMDItr != m_ModuleMetadata->FuncMD.end())
+    {
+        if (funcMDItr->second.privateMemoryPerWI != 0)
+        {
+            unsigned totalAllocaSize = funcMDItr->second.privateMemoryPerWI * numLanes(m_dispatchSize);
+            encoder.Add(pTemp, pTemp, ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
+            encoder.Push();
+
+            // Set the total alloca size for the entry function
+            encoder.SetFunctionAllocaStackSize(entry, totalAllocaSize);
+
+            if ((uint32_t)funcMDItr->second.privateMemoryPerWI > MaxPrivateSize)
+            {
+                GetContext()->EmitError("Private memory allocation exceeds max allowed size");
+                IGC_ASSERT(0);
+            }
+        }
+    }
+
+    if (!IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+    {
+        // If we don't return per-function private memory size,
+        // modify private-memory size to a large setting.
+        // This will be reported through patch-tokens as per-kernel requirement.
+        m_ModuleMetadata->FuncMD[entry].privateMemoryPerWI = MaxPrivateSize;
+    }
+
+    stackBase = GetSymbol(kerArg);
+    stackAllocSize = pTemp;
+}
+
+/// save stack-pointer when entering a stack-call function
+void CShader::SaveSP()
+{
+    IGC_ASSERT(!m_SavedSP);
+    IGC_ASSERT(m_SP);
+    m_SavedSP = GetNewVariable(m_SP);
+    encoder.Copy(m_SavedSP, m_SP);
     encoder.Push();
 }
 
-/// restore SP and FP when exiting a stack-call function
-void CShader::RestoreStackState()
+/// restore stack-pointer when exiting a stack-call function
+void CShader::RestoreSP()
 {
-    IGC_ASSERT(m_SavedFP && m_FP && m_SP);
-    // Restore SP to current FP
-    encoder.Copy(m_SP, m_FP);
+    IGC_ASSERT(m_SavedSP);
+    IGC_ASSERT(m_SP);
+    encoder.Copy(m_SP, m_SavedSP);
     encoder.Push();
-    // Restore FP to previous frame's FP
-    encoder.Copy(m_FP, m_SavedFP);
-    encoder.Push();
-    m_SavedFP = nullptr;
+    m_SavedSP = nullptr;
 }
 
 void CShader::CreateImplicitArgs()
@@ -308,8 +386,7 @@ void CShader::CreateImplicitArgs()
     // Push Args are only for entry function
     unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
     unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) && !isNonEntryMultirateShader(entry) ? numPushArgsEntry : 0);
-    int numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
-    IGC_ASSERT(numFuncArgs >= 0 && "Function arg size does not match meta data and push args.");
+    unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
 
     // Create symbol for every arguments [5/2019]
     //   (Previously, symbols are created only for implicit args.)
@@ -345,7 +422,7 @@ void CShader::CreateImplicitArgs()
     };
 
     llvm::Function::arg_iterator arg = entry->arg_begin();
-    for (int i = 0; i < numFuncArgs; ++i, ++arg)
+    for (unsigned i = 0; i < numFuncArgs; ++i, ++arg)
     {
         Value* ArgVal = arg;
         if (ArgVal->use_empty())
@@ -399,25 +476,6 @@ void CShader::CreateImplicitArgs()
     CreateAliasVars();
 }
 
-void CShader::GetPrintfStrings(std::vector<std::pair<unsigned int, std::string>>& printfStrings)
-{
-    std::string MDNodeName = "printf.strings";
-    NamedMDNode* printfMDNode = entry->getParent()->getOrInsertNamedMetadata(MDNodeName);
-
-    for (uint i = 0, NumStrings = printfMDNode->getNumOperands();
-        i < NumStrings;
-        i++)
-    {
-        llvm::MDNode* argMDNode = printfMDNode->getOperand(i);
-        llvm::ConstantInt* indexOpndVal =
-            mdconst::dyn_extract<llvm::ConstantInt>(argMDNode->getOperand(0));
-        llvm::MDString* stringOpndVal =
-            dyn_cast<llvm::MDString>(argMDNode->getOperand(1));
-
-        printfStrings.push_back(
-            std::pair<unsigned int, std::string>(int_cast<unsigned int>(indexOpndVal->getZExtValue()), stringOpndVal->getString().data()));
-    }
-}
 // For sub-vector aliasing, pre-allocating cvariables for those
 // valeus that have sub-vector aliasing before emit instructions.
 // (The sub-vector aliasing is done in VariableReuseAnalysis.)
@@ -639,8 +697,6 @@ void  CShader::CreateConstantBufferOutput(SKernelProgram* pKernelProgram)
     for (unsigned int i = 0; i < pushInfo.simplePushBufferUsed; i++)
     {
         pKernelProgram->simplePushInfoArr[i].m_cbIdx = pushInfo.simplePushInfoArr[i].cbIdx;
-        pKernelProgram->simplePushInfoArr[i].m_pushableAddressGrfOffset= pushInfo.simplePushInfoArr[i].pushableAddressGrfOffset;
-        pKernelProgram->simplePushInfoArr[i].m_pushableOffsetGrfOffset = pushInfo.simplePushInfoArr[i].pushableOffsetGrfOffset;
         pKernelProgram->simplePushInfoArr[i].m_offset = pushInfo.simplePushInfoArr[i].offset;
         pKernelProgram->simplePushInfoArr[i].m_size = pushInfo.simplePushInfoArr[i].size;
         pKernelProgram->simplePushInfoArr[i].isStateless = pushInfo.simplePushInfoArr[i].isStateless;
@@ -766,41 +822,13 @@ CVariable* CShader::GetHWTID()
 {
     if (!m_HW_TID)
     {
-        {
-            m_HW_TID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, "HWTID");
-            encoder.GetVISAPredefinedVar(m_HW_TID, PREDEFINED_HW_TID);
-        }
+        m_HW_TID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, CName::NONE);
+        encoder.GetVISAPredefinedVar(m_HW_TID, PREDEFINED_HW_TID);
     }
     return m_HW_TID;
 }
 
-CVariable* CShader::GetPrivateBase()
-{
-    ImplicitArgs implicitArgs(*entry, m_pMdUtils);
-    unsigned numPushArgs = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-    unsigned numImplicitArgs = implicitArgs.size();
-    unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
 
-    Argument* kerArg = nullptr;
-    llvm::Function::arg_iterator arg = entry->arg_begin();
-    for (unsigned i = 0; i < numFuncArgs; ++i, ++arg);
-    for (unsigned i = 0; i < numImplicitArgs; ++i, ++arg) {
-        ImplicitArg implicitArg = implicitArgs[i];
-        if (implicitArg.getArgType() == ImplicitArg::ArgType::PRIVATE_BASE)
-        {
-            kerArg = (&*arg);
-            break;
-        }
-    }
-    IGC_ASSERT(kerArg);
-    return GetSymbol(kerArg);
-}
-
-CVariable* CShader::GetFP()
-{
-    IGC_ASSERT(m_FP);
-    return m_FP;
-}
 CVariable* CShader::GetSP()
 {
     IGC_ASSERT(m_SP);
@@ -1567,6 +1595,57 @@ auto sizeToSIMDMode = [](uint32_t size)
     }
 };
 
+CVariable* CShader::GetStructVariable(llvm::Value* value, llvm::Constant* initValue)
+{
+    IGC_ASSERT(value->getType()->isStructTy());
+
+    // check if we already created the symbol mapping
+    if (!isa<Constant>(value))
+    {
+        auto it = symbolMapping.find(value);
+        if (it != symbolMapping.end())
+        {
+            return it->second;
+        }
+    }
+
+    StructType* sTy = cast<StructType>(value->getType());
+    auto& DL = entry->getParent()->getDataLayout();
+    const StructLayout* SL = DL.getStructLayout(sTy);
+
+    unsigned structSizeInBytes = (unsigned)SL->getSizeInBytes();
+    // Represent the struct as a vector of BYTES
+    bool isUniform = GetIsUniform(value);
+    unsigned lanes = isUniform ? 1 : numLanes(m_dispatchSize);
+    CVariable* cVar =
+        GetNewVariable(structSizeInBytes * lanes, ISA_TYPE_B, EALIGN_GRF, isUniform, value->getName());
+
+    // Initialize the struct
+    if (Constant* C = dyn_cast<Constant>(value))
+        initValue = C;
+
+    if (initValue)
+    {
+        for (unsigned i = 0; i < sTy->getNumElements(); i++)
+        {
+            CVariable* elementSrc = GetSymbol(initValue->getAggregateElement(i));
+            if (!elementSrc->IsUndef())
+            {
+                unsigned elementOffset = (unsigned)SL->getElementOffset(i);
+                CVariable* elementDst = GetNewAlias(cVar, elementSrc->GetType(), elementOffset * lanes, elementSrc->GetNumberElement() * lanes);
+                GetEncoder().Copy(elementDst, elementSrc);
+                GetEncoder().Push();
+            }
+        }
+    }
+
+    if (!isa<Constant>(value))
+    {
+        symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, cVar));
+    }
+    return cVar;
+}
+
 CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 {
     llvm::VectorType* VTy = llvm::dyn_cast<llvm::VectorType>(C->getType());
@@ -1845,16 +1924,16 @@ static e_alignment GetPreferredAlignmentOnUse(llvm::Value* V, WIAnalysis* WIA,
                 Value* Ptr = ST->getPointerOperand();
                 if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
                     if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pCtx))
-                        return (pCtx->platform.getGRFSize() == 64) ? EALIGN_64WORD : EALIGN_32WORD;
-                    return (pCtx->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+                        return EALIGN_2GRF;
+                    return EALIGN_GRF;
                 }
             }
             if (StoreInst* ST = dyn_cast<StoreInst>(*UI)) {
                 Value* Ptr = ST->getPointerOperand();
                 if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
                     if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pCtx))
-                        return (pCtx->platform.getGRFSize() == 64) ? EALIGN_64WORD : EALIGN_32WORD;
-                    return (pCtx->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+                        return EALIGN_2GRF;
+                    return EALIGN_GRF;
                 }
             }
 
@@ -1869,9 +1948,9 @@ static e_alignment GetPreferredAlignmentOnUse(llvm::Value* V, WIAnalysis* WIA,
                 if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
                     if (PointerType* PtrTy = dyn_cast<PointerType>(Ptr->getType())) {
                         if (IGC::isA64Ptr(PtrTy, pCtx))
-                            return (pCtx->platform.getGRFSize() == 64) ? EALIGN_64WORD : EALIGN_32WORD;
+                            return EALIGN_2GRF;
                     }
-                    return (pCtx->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+                    return EALIGN_GRF;
                 }
             }
         }
@@ -1935,10 +2014,10 @@ e_alignment IGC::GetPreferredAlignment(llvm::Value* V, WIAnalysis* WIA,
     if (LoadInst * LD = dyn_cast<LoadInst>(V)) {
         Value* Ptr = LD->getPointerOperand();
         // For 64-bit load, we have to check how the loaded value being used.
-        e_alignment Align = (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+        e_alignment Align = EALIGN_GRF;
         if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pContext))
             Align = GetPreferredAlignmentOnUse(V, WIA, pContext);
-        return (Align == EALIGN_AUTO) ? (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD : Align;
+        return (Align == EALIGN_AUTO) ? EALIGN_GRF : Align;
     }
 
     // If uniform variables are results from uniform atomic ops, they need
@@ -1948,12 +2027,12 @@ e_alignment IGC::GetPreferredAlignment(llvm::Value* V, WIAnalysis* WIA,
         Value* Ptr = GII->getArgOperand(1);
         // For 64-bit atomic ops, we have to check how the return value being
         // used.
-        e_alignment Align = (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+        e_alignment Align = EALIGN_GRF;
         if (PointerType * PtrTy = dyn_cast<PointerType>(Ptr->getType())) {
             if (IGC::isA64Ptr(PtrTy, pContext))
                 Align = GetPreferredAlignmentOnUse(V, WIA, pContext);
         }
-        return (Align == EALIGN_AUTO) ? (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD : Align;
+        return (Align == EALIGN_AUTO) ? EALIGN_GRF : Align;
     }
 
     // Check how that value is used.
@@ -1990,7 +2069,7 @@ CVariable* CShader::LazyCreateCCTupleBackingVariable(
         var = GetNewVariable(
             (uint16_t)numElts,
             ISA_TYPE_F,
-            (GetContext()->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD,
+            EALIGN_GRF,
             false,
             m_numberInstance,
             "CCTuple");
@@ -2420,6 +2499,12 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
 {
     CVariable* var = nullptr;
 
+    // Symbol mappings for struct types
+    if (value->getType()->isStructTy())
+    {
+        return GetStructVariable(value);
+    }
+
     if (Constant * C = llvm::dyn_cast<llvm::Constant>(value))
     {
         // Check for function and global symbols
@@ -2471,7 +2556,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
                 {
                     // Map the entire vector value to the CVar
                     unsigned numElements = value->getType()->getVectorNumElements();
-                    var = GetNewVariable(numElements, ISA_TYPE_UQ, (GetContext()->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD, true, 1, valName);
+                    var = GetNewVariable(numElements, ISA_TYPE_UQ, EALIGN_GRF, true, 1, valName);
                     symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
 
                     // Copy over each element

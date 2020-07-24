@@ -87,7 +87,7 @@ public:
 
 public:
     // GetZEBinary - get ZE binary object
-    virtual void GetZEBinary(llvm::raw_pwrite_stream& programBinary,
+    virtual void GetZEBinary(Util::BinaryStream& programBinary,
         unsigned pointerSizeInBytes) {}
 
 protected:
@@ -109,7 +109,7 @@ public:
     /// m_ProgramScopePatchStream and m_KernelBinaries
     void CreateKernelBinaries();
 
-    /// getZEBinary - create and get ZE Binary
+    /// getZEBinary - create ZE Binary
     void GetZEBinary(llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes);
 
     // Used to track the kernel info from CodeGen
@@ -127,8 +127,6 @@ public:
     // Produce the final ELF binary with the given CM kernels
     // in OpenCL format.
     void CreateKernelBinaries();
-    void GetZEBinary(llvm::raw_pwrite_stream& programBinary,
-        unsigned pointerSizeInBytes) override;
 
     // CM kernel list.
     std::vector<cmc::CMKernel*> m_kernels;

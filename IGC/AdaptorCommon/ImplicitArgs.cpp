@@ -173,8 +173,8 @@ IGC::e_alignment ImplicitArg::getAlignType(const DataLayout& DL) const
            return IGC::EALIGN_DWORD;
         case ALIGN_QWORD:
             return IGC::EALIGN_QWORD;
-        case ALIGN_GRF: //According to old implementation, EALIGN_GRF = EALIGN_HWORD, the correpsonding alignmentSize is 32, so EALIGN_HWORD will not change the old define.
-           return IGC::EALIGN_HWORD;  //FIXME: But, the ALIGN_GRF is really GRF aligned? If so, there is bug here.
+        case ALIGN_GRF:
+           return IGC::EALIGN_GRF;
         case ALIGN_PTR:
           return getPointerSize(DL) == 4 ? IGC::EALIGN_DWORD : IGC::EALIGN_QWORD;
         default:
@@ -410,9 +410,9 @@ unsigned int ImplicitArgs::getNumberedArgIndex(ImplicitArg::ArgType argType, int
 }
 
 void ImplicitArgs::addImplicitArgs(llvm::Function& F, SmallVectorImpl<ImplicitArg::ArgType>& implicitArgs, MetaDataUtils* pMdUtils) {
-    // Stack calls does not support implicit arguments!
-    // Just return for now. TODO: Each pass should check if it's inserting implicit arg to stackcall function
-    if (F.hasFnAttribute("visaStackCall"))
+    // Indirect calls does not support implicit arguments!
+    // Just return for now. TODO: Each pass should check if it's inserting implicit arg to indirect function
+    if (F.hasFnAttribute("IndirectlyCalled"))
         return;
 
     // Add implicit args metadata for the given function
@@ -426,6 +426,7 @@ void ImplicitArgs::addImplicitArgs(llvm::Function& F, SmallVectorImpl<ImplicitAr
             funcInfo->addImplicitArgInfoListItem(argMD);
         }
     }
+    pMdUtils->save(F.getParent()->getContext());
 }
 
 void ImplicitArgs::addImageArgs(llvm::Function& F, ImplicitArg::ArgMap& argMap, MetaDataUtils* pMdUtils)
@@ -442,6 +443,7 @@ void ImplicitArgs::addImageArgs(llvm::Function& F, ImplicitArg::ArgMap& argMap, 
             funcInfo->addImplicitArgInfoListItem(argMD);
         }
     }
+    pMdUtils->save(F.getParent()->getContext());
 }
 
 void ImplicitArgs::addStructArgs(llvm::Function& F, const Argument* A, const ImplicitArg::StructArgList& S, MetaDataUtils* pMdUtils)
@@ -458,6 +460,8 @@ void ImplicitArgs::addStructArgs(llvm::Function& F, const Argument* A, const Imp
         argMD->setStructArgOffset(offset);
         funcInfo->addImplicitArgInfoListItem(argMD);
     }
+
+    pMdUtils->save(F.getParent()->getContext());
 }
 
 void ImplicitArgs::addNumberedArgs(llvm::Function& F, ImplicitArg::ArgMap& argMap, IGCMD::MetaDataUtils* pMdUtils)
@@ -475,6 +479,7 @@ void ImplicitArgs::addNumberedArgs(llvm::Function& F, ImplicitArg::ArgMap& argMa
       funcInfo->addImplicitArgInfoListItem(argMD);
     }
   }
+  pMdUtils->save(F.getParent()->getContext());
 }
 
 // Add one implicit argument for each pointer argument to global or constant buffer.

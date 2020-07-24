@@ -66,7 +66,6 @@ DEF_VISA_OPTION(vISA_numGeneralAcc,         ET_INT32, "-numGeneralAcc", "USAGE: 
 DEF_VISA_OPTION(vISA_reassociate,           ET_BOOL, "-noreassoc",   UNUSED, true)
 DEF_VISA_OPTION(vISA_split4GRFVar,          ET_BOOL, "-no4GRFSplit", UNUSED, true)
 DEF_VISA_OPTION(vISA_divergentBB,           ET_BOOL, "-divergentBB", UNUSED, true)
-DEF_VISA_OPTION(vISA_splitInstructions,     ET_BOOL, "-noSplitInstructions", UNUSED, true)
 
 //=== code gen options ===
 DEF_VISA_OPTION(vISA_noSrc1Byte,          ET_BOOL, "-nosrc1byte",         UNUSED, false)
@@ -77,18 +76,17 @@ DEF_VISA_OPTION(vISA_forceSamplerHeader,  ET_BOOL, "-forceSamplerHeader", UNUSED
 DEF_VISA_OPTION(vISA_noncoherentStateless, ET_BOOL, "-ncstateless",       UNUSED, false)
 DEF_VISA_OPTION(vISA_enablePreemption,    ET_BOOL,  "-enablePreemption",  UNUSED, false)
 DEF_VISA_OPTION(VISA_EnableBarrierInstCounterBits, ET_BOOL, "-enableBarrierInstCounterBits", UNUSED, false)
-DEF_VISA_OPTION(vISA_forceFPMAD,            ET_BOOL, NULLSTR,               UNUSED, true)
-DEF_VISA_OPTION(vISA_DisableMixMode,        ET_BOOL, "-disableMixMode",     UNUSED, false)
-DEF_VISA_OPTION(vISA_DisableHFMath,         ET_BOOL, "-disableHFMath",      UNUSED, false)
-DEF_VISA_OPTION(vISA_ForceMixMode,          ET_BOOL, "-forceMixMode",       UNUSED, false)
-DEF_VISA_OPTION(vISA_UseSends,              ET_BOOL, "-nosends",            UNUSED, true)
-DEF_VISA_OPTION(vISA_doAlign1Ternary,       ET_BOOL, "-noalign1ternary",    UNUSED, true)
-DEF_VISA_OPTION(vISA_loadThreadPayload,     ET_BOOL, "-noLoadPayload",      UNUSED, true)
-DEF_VISA_OPTION(vISA_foldEOTtoPrevSend,     ET_BOOL, "-foldEOT",            UNUSED, false)
-DEF_VISA_OPTION(vISA_hasRNEandDenorm,       ET_BOOL, "-hasRNEandDenorm",    UNUSED, false)
-DEF_VISA_OPTION(vISA_forceNoFP64bRegioning, ET_BOOL, "-noFP64bRegion",      UNUSED, false)
-DEF_VISA_OPTION(vISA_alignBindlessSampler,  ET_BOOL, "-alignBS",            UNUSED, false)
-DEF_VISA_OPTION(vISA_noStitchExternFunc,    ET_BOOL, "-noStitchExternFunc", UNUSED, true)
+DEF_VISA_OPTION(vISA_forceFPMAD,            ET_BOOL, NULLSTR,            UNUSED, true)
+DEF_VISA_OPTION(vISA_DisableMixMode,        ET_BOOL, "-disableMixMode",  UNUSED, false)
+DEF_VISA_OPTION(vISA_DisableHFMath,         ET_BOOL, "-disableHFMath",   UNUSED, false)
+DEF_VISA_OPTION(vISA_ForceMixMode,          ET_BOOL, "-forceMixMode",    UNUSED, false)
+DEF_VISA_OPTION(vISA_UseSends,              ET_BOOL, "-nosends",         UNUSED, true)
+DEF_VISA_OPTION(vISA_doAlign1Ternary,       ET_BOOL, "-noalign1ternary", UNUSED, true)
+DEF_VISA_OPTION(vISA_loadThreadPayload,     ET_BOOL, "-noLoadPayload",   UNUSED, true)
+DEF_VISA_OPTION(vISA_foldEOTtoPrevSend,     ET_BOOL, "-foldEOT",         UNUSED, false)
+DEF_VISA_OPTION(vISA_hasRNEandDenorm,       ET_BOOL, "-hasRNEandDenorm", UNUSED, false)
+DEF_VISA_OPTION(vISA_forceNoFP64bRegioning, ET_BOOL, "-noFP64bRegion",   UNUSED, false)
+DEF_VISA_OPTION(vISA_alignBindlessSampler,  ET_BOOL, "-alignBS",         UNUSED, false)
 
 //=== RA options ===
 DEF_VISA_OPTION(vISA_RoundRobin,            ET_BOOL, "-noroundrobin",    UNUSED, true)
@@ -129,7 +127,6 @@ DEF_VISA_OPTION(vISA_LraFFWindowSize,       ET_INT32, "-lraFFWindowSize", UNUSED
 DEF_VISA_OPTION(vISA_VerifyAugmentation,    ET_BOOL, "-verifyaugmentation", UNUSED, false)
 DEF_VISA_OPTION(vISA_VerifyExplicitSplit,   ET_BOOL, "-verifysplit", UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpRegChart,          ET_BOOL, "-dumpregchart", UNUSED, false)
-DEF_VISA_OPTION(vISA_DumpAllBCInfo,          ET_BOOL, "-dumpAllBCInfo", UNUSED, false)
 
 //=== scheduler options ===
 DEF_VISA_OPTION(vISA_LocalScheduling,       ET_BOOL, "-noschedule",      UNUSED, true)
@@ -214,7 +211,7 @@ DEF_VISA_OPTION(vISA_isParseMode,         ET_BOOL,  NULLSTR,              UNUSED
 DEF_VISA_OPTION(vISA_ReRAPostSchedule,    ET_BOOL,  "-rerapostschedule",  UNUSED, false)
 DEF_VISA_OPTION(vISA_GTPinReRA,           ET_BOOL, "-GTPinReRA",          UNUSED, false)
 DEF_VISA_OPTION(vISA_GetFreeGRFInfo,      ET_BOOL,  "-getfreegrfinfo",    UNUSED, false)
-DEF_VISA_OPTION(vISA_GTPinScratchAreaSize,ET_INT32, "-GTPinScratchAreaSize", UNUSED, 0)
+DEF_VISA_OPTION(vISA_GTPinScratchAreaSize,ET_INT32, "-GTPinScratchAreaSize", UNUSED, false)
 
 //=== HW Workarounds ===
 DEF_VISA_OPTION(vISA_clearScratchWritesBeforeEOT,   ET_BOOL,  NULLSTR, UNUSED, false)

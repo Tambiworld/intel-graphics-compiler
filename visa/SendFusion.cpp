@@ -145,18 +145,8 @@ namespace vISA
               FlagDefPerBB(nullptr),
               WAce0Read(false)
         {
-            // Using "dmask (sr0.2) And ce0.0" for emask for each BB is not very safe
-            // for the following reasons:
-            //    1) shader may use vmask; or
-            //    2) reading ce might be unsafe (for example, hardware issue)
-            // Thus, we set WAce0Read to true to force using "cmp r0, r0" to create emask
-            // always, and no dmask would be used at all!
-            //WAce0Read = VISA_WA_CHECK(Builder->getPWaTable(), Wa_1406950495) ;
-            WAce0Read = true;
-            if (!WAce0Read)
-            {
-                initDMaskModInfo();
-            }
+            WAce0Read = VISA_WA_CHECK(Builder->getPWaTable(), Wa_1406950495) ;
+            initDMaskModInfo();
         }
 
         bool run(G4_BB* BB);
@@ -819,7 +809,7 @@ void SendFusion::doSink(
 
         for (int i = 1; i < numToBeSinked; ++i)
         {
-            CurrBB->insertBefore(InsertBeforePos, InstToBeSinked[i]);
+            CurrBB->insert(InsertBeforePos, InstToBeSinked[i]);
         }
     }
 }
@@ -862,7 +852,7 @@ void SendFusion::doHoist(
 
         for (int i = numToBeHoisted - 1; i > 0; --i)
         {
-            CurrBB->insertBefore(InsertBeforePos, InstToBeHoisted[i]);
+            CurrBB->insert(InsertBeforePos, InstToBeHoisted[i]);
         }
     }
 }
@@ -910,7 +900,7 @@ void SendFusion::packPayload(
         G4_DstRegRegion* D = Builder->createDst(
             DVar, D_regoff, D_sregoff, 1, Ty);
         G4_INST* nInst = Builder->createMov(ES, D, S, option, false);
-        bb->insertBefore(InsertBeforePos, nInst);
+        bb->insert(InsertBeforePos, nInst);
         return nInst;
     };
 
@@ -1107,7 +1097,7 @@ void SendFusion::unpackPayload(
         D = Builder->createDst(
             Dst0, Off0 + i, 0, 1, Ty);
         G4_INST* Inst0 = Builder->createMov(ExecSize, D, S, option, false);
-        bb->insertBefore(InsertBeforePos, Inst0);
+        bb->insert(InsertBeforePos, Inst0);
 
         // Update DefUse
         FusedSend->addDefUse(Inst0, Opnd_src0);
@@ -1124,7 +1114,7 @@ void SendFusion::unpackPayload(
             stride1, Ty);
         D = Builder->createDst(Dst1, Off1 + i, 0, 1, Ty);
         G4_INST* Inst1 = Builder->createMov(ExecSize, D, S, option, false);
-        bb->insertBefore(InsertBeforePos, Inst1);
+        bb->insert(InsertBeforePos, Inst1);
 
         // Update DefUse
         FusedSend->addDefUse(Inst1, Opnd_src0);
@@ -1169,7 +1159,7 @@ void SendFusion::createDMask(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
     G4_DstRegRegion* Dst = Builder->createDst(
         dmaskDecl->getRegVar(), 0, 0, 1, Type_UD);
     G4_INST* Inst = Builder->createMov(1, Dst, Src, InstOpt_WriteEnable, false);
-    bb->insertBefore(InsertBeforePos, Inst);
+    bb->insert(InsertBeforePos, Inst);
 
     // update DefUse info
     CFG->globalOpndHT.addGlobalOpnd(Dst);
@@ -1190,7 +1180,7 @@ void SendFusion::createDMask(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
         G4_DstRegRegion* D = Builder->createDst(
             dmaskDecl->getRegVar(), 0, 0, 1, Type_UD);
         G4_INST* Inst = Builder->createMov(1, D, S, InstOpt_WriteEnable, false);
-        BB->insertBefore(InsertPos, Inst);
+        BB->insert(InsertPos, Inst);
     }
 }
 
@@ -1226,7 +1216,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
 
         G4_INST* I0 = Builder->createMov(1, flag,
             Builder->createImm(0, Type_UW), InstOpt_WriteEnable, false);
-        bb->insertBefore(InsertBeforePos, I0);
+        bb->insert(InsertBeforePos, I0);
 
         G4_SrcRegRegion *r0_0 = Builder->createSrcRegRegion(
             Mod_src_undef, Direct,
@@ -1241,7 +1231,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
         // Hard-coded simd8 here!
         G4_INST* I1 = Builder->createInternalInst(NULL, G4_cmp, flagCM, false, 8,
             nullDst, r0_0, r0_1, InstOpt_M0);
-        bb->insertBefore(InsertBeforePos, I1);
+        bb->insert(InsertBeforePos, I1);
 
         G4_SrcRegRegion *flagSrc = Builder->createSrcRegRegion(
             Mod_src_undef, Direct,
@@ -1250,7 +1240,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
         G4_DstRegRegion* tmpDst1 = Builder->createDst(
             tmpDecl->getRegVar(), 0, 0, 1, Type_UW);
         Inst0 = Builder->createMov( 1, tmpDst1, flagSrc, InstOpt_WriteEnable, false);
-        bb->insertBefore(InsertBeforePos, Inst0);
+        bb->insert(InsertBeforePos, Inst0);
 
         // update DefUse
         I1->addDefUse(Inst0, Opnd_src0);
@@ -1258,7 +1248,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
     }
     else
     {
-        // (W) and (1|M0) tmp<1>:ud ce0.0<0;1,0>:ud DMaskUD:ud
+        // (W) and (|M0) tmp<1>:ud ce0.0<0;1,0>:ud DMaskUD:ud
         G4_SrcRegRegion *ce0Src = Builder->createSrcRegRegion(
             Mod_src_undef, Direct, Builder->phyregpool.getMask0Reg(), 0, 0, scalar, Type_UD);
         G4_SrcRegRegion *dmaskSrc = Builder->createSrcRegRegion(
@@ -1267,7 +1257,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
             tmpDecl->getRegVar(), 0, 0, 1, Type_UD);
         Inst0 = Builder->createBinOp(
             G4_and, 1, tmpDst, ce0Src, dmaskSrc, InstOpt_WriteEnable, false);
-        bb->insertBefore(InsertBeforePos, Inst0);
+        bb->insert(InsertBeforePos, Inst0);
     }
 
     //  Duplicate 8-bit mask to the next 8 bits
@@ -1279,7 +1269,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
     G4_DstRegRegion* D = Builder->createDst(
         tmpUBDecl->getRegVar(), 0, 0, 1, Type_UB);
     G4_INST* Inst1 = Builder->createMov(2, D, S, InstOpt_WriteEnable, false);
-    bb->insertBefore(InsertBeforePos, Inst1);
+    bb->insert(InsertBeforePos, Inst1);
 
     // update DefUse
     Inst0->addDefUse(Inst1, Opnd_src0);
@@ -1292,7 +1282,7 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
     G4_DstRegRegion* flag = Builder->createDst(
         FlagPerBB, 0, 0, 1, Type_UW);
     FlagDefPerBB = Builder->createMov(1, flag, Src, InstOpt_WriteEnable, false);
-    bb->insertBefore(InsertBeforePos, FlagDefPerBB);
+    bb->insert(InsertBeforePos, FlagDefPerBB);
 
     // update DefUse
     Inst1->addDefUse(FlagDefPerBB, Opnd_src0);
@@ -1480,7 +1470,7 @@ void SendFusion::doFusion(
         {   // move depInst first if doing hoisting
             doHoist(IT0, IT1, InsertBeforePos);
         }
-        CurrBB->insertBefore(InsertBeforePos, sendInst);
+        CurrBB->insert(InsertBeforePos, sendInst);
 
         // Update DefUse
         if (Pred)
@@ -1565,7 +1555,7 @@ void SendFusion::doFusion(
         FlagDefPerBB->addDefUse(sendInst, Opnd_pred);
     }
 
-    CurrBB->insertBefore(InsertBeforePos, sendInst);
+    CurrBB->insert(InsertBeforePos, sendInst);
 
     if (rspLen > 0)
     {

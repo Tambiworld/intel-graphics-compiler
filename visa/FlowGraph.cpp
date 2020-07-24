@@ -277,7 +277,7 @@ int64_t FlowGraph::insertDummyUUIDMov()
             {
                 if ((*it)->isLabel())
                 {
-                    bb->insertBefore(++it, movInst);
+                    bb->insert(++it, movInst);
                     return uuID;
                 }
 
@@ -962,7 +962,7 @@ void IR_Builder::materializeGlobalImm(G4_BB* entryBB)
             Create_Dst_Opnd_From_Dcl(dcl, 1), immVal.imm, InstOpt_WriteEnable, false);
         auto iter = std::find_if(entryBB->begin(), entryBB->end(),
             [](G4_INST* inst) { return !inst->isLabel(); });
-        entryBB->insertBefore(iter, inst);
+        entryBB->insert(iter, inst);
     }
 }
 
@@ -1007,7 +1007,7 @@ void FlowGraph::handleWait()
                     if (sendInst != NULL)
                     {
                         sendInst->setSendc();
-                        bb->insertBefore(iter, fenceInst);
+                        bb->insert(iter, fenceInst);
                     }
                 }
                 iter = bb->erase(iter);
@@ -3141,7 +3141,7 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
         {
             G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt,
                 secondInst->getLineNo(), secondInst->getCISAOff(), secondInst->getSrcFilename());
-            bb->insertBefore(iter, jInst);
+            bb->insert(iter, jInst);
         }
     }
 }
@@ -3207,7 +3207,7 @@ G4_Label* FlowGraph::insertEndif(G4_BB* bb, unsigned char execSize, bool createL
     INST_LIST_ITER iter = bb->begin();
     MUST_BE_TRUE(iter != bb->end(), "empty BB");
     iter++;
-    bb->insertBefore(iter, endifInst);
+    bb->insert(iter, endifInst);
 
     // this block may be a target of multiple ifs, in which case we will need to insert
     // one endif for each if.  The innermost endif will use the BB label, while for the other
@@ -3440,10 +3440,10 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                         G4_Declare* tmpFlagDcl = builder->createTempFlag(execSize);
                         G4_DstRegRegion* newPredDef = builder->createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == 2 ? Type_UD : Type_UW);
                         G4_INST* predInst = builder->createMov(1, newPredDef, builder->createImm(0, Type_UW),
-                            InstOpt_WriteEnable, false);
+                            InstOpt_WriteEnable, false, lastInst->getLineNo(), lastInst->getCISAOff(), lastInst->getSrcFilename());
                         INST_LIST_ITER iter = bb->end();
                         iter--;
-                        bb->insertBefore(iter, predInst);
+                        bb->insert(iter, predInst);
 
                         pred = builder->createPredicate(
                             PredState_Plus,
@@ -4701,10 +4701,11 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     G4_DstRegRegion* movDst = builder->Create_Dst_Opnd_From_Dcl(dcl, 1);
     G4_SrcRegRegion* r0Src = builder->Create_Src_Opnd_From_Dcl(
         builder->getBuiltinR0(), builder->getRegionStride1());
-    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false);
+    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false,
+        lastInst ? lastInst->getLineNo() : 0, lastInst ? lastInst->getCISAOff() : UNMAPPABLE_VISA_INDEX,
+        lastInst ? lastInst->getSrcFilename() : nullptr);
     if (lastInst)
     {
-        movInst->setCISAOff(lastInst->getCISAOff());
         movInst->setLocation(lastInst->getLocation());
     }
     instList.push_back(movInst);
@@ -5222,20 +5223,33 @@ static int getConflictTimesForTGL(std::ostream& output, int *firstRegCandidate, 
 
 /*
  * Gen12 BC evaluation
- * All read suppression is GRF granularity based.
- * Read suppression only happens between or within a physical instruction not compressed one. Compressed one will be split into physical instructions.
+ * In Gen12, there are 8 bundles and 2 banks per HW thread.
+ * Banks are divided according to EVEN/ODD of register index: 0101010101010101
+ * There are 8 bundles per 16 registers:  0011223344556677
+ * For two adjacent instructions: inst1 and inst2,  inst1_src1(, inst1_src2) and inst2_src0 will be read in same cycle
+ * Considered HW swap and read suppresion mechanisms
+ * HW swap:
+ *     The origional GRF register reading sequence for a three source instruction is: src0 in cycle0 and src1 and src2 in cycle2.
+ *     HW swap mechanism detects the conflict between src1 and src2, if there is a conflict,  HW will read src1 in cycle0 and src0 and src2 in cycle1.
+ *     Note that:
+ *     1. for SIMD16, HW swap only happens when detecting conflicts in first simd8's registers. conflict in second simd8 will not trigger swap.
+ *     2. for SIMD16, when swapping happens, the src1 and src0 of both simd8 instructions will be swapped.
  * Read suppression between instructions:
  *     The read suppression mechanism is used to save the GRF register reading operations with a register cache in HW. The suppression we talked here
  *     is the suppression between instructions. For each source operand slot, HW provide a GRF cache. With the cache, if the same GRF will be read in
  *     the instruction, the read will not happen, the cached value will be used directly.
  *     Note that:
- *     1. Inter read suppression is the suppression cache based.
- *     2. For compressed instructino 2 GRFs read suppression for src1 for DF and F type operands and 1 GRF read suppression for src0 and src2.
- *     3. The slot cache will be flushed if the buffered register is used as destination operand.
- *
+ *     1. The cache will only buffer the latest GRF which was read
+ *     2. The cache will be flushed if the buffered register is used as destination operand.
+ *     3. For SIMD16, if one source is scalar, the read suppression doen't happen, no matter within the SIMD16 instruction or with the following instruction.
+ *     4. The read suppression between instructions only happens in src1 and src2
+ *     5. 2 GRFs read suppression for src1 and 1 GRF read suppression for src0 and src2.
  * Read suppression within a instruction:
  *     1. Works for all source operands.
- *     2. intra suppression is the GRF read operation based(no read no suppression).
+ *
+ * suppressRegs is used as the read suppression buffer
+ * lastDst is used to keep dst register of last instruction. It's used to clear read suppression buffer. Once a register is defined, it's not buffered anymore
+ * lastRegs is used to keep the src1 and src2 of last instruction, in case there is conflict with current instruction GRF read
  */
 uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, int *suppressRegs, int &sameConflictTimes, int &twoSrcConflicts, int &simd16RS, bool zeroOne, bool isTGLLP)
 {
@@ -5256,10 +5270,10 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
     }
 
     int currInstRegs[2][G4_MAX_SRCS];
-    int readRegs[2][G4_MAX_SRCS];
     int currInstExecSize[G4_MAX_SRCS] = {0};
     int firstRegCandidate[G4_MAX_SRCS];
     int secondRegCandidate[G4_MAX_SRCS];
+    bool isScalar[G4_MAX_SRCS];
     int candidateNum = 0;
     int dstExecSize = 0;
     int dstRegs[2];
@@ -5270,16 +5284,12 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         setInValidReg(secondRegCandidate[i]);
         setInValidReg(currInstRegs[0][i]);
         setInValidReg(currInstRegs[1][i]);
-        setInValidReg(readRegs[0][i]);
-        setInValidReg(readRegs[1][i]);
+        isScalar[i] = false;
     }
     setInValidReg(dstRegs[0]);
     setInValidReg(dstRegs[1]);
 
-    bool isCompressedInst = false;
-    bool isLastInstCompressed = suppressRegs[4] == 1;
-    bool isFDFSrc1 = false;
-    bool isSrc1Suppressed = false;
+    bool instSplit = false;
 
     //Get Dst
     G4_DstRegRegion* dstOpnd = inst->getDst();
@@ -5293,7 +5303,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         if (dstExecSize > getGRFSize())
         {
             dstRegs[1] = dstRegs[0] + (dstExecSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
-            isCompressedInst = true;
+            instSplit = true;
         }
     }
 
@@ -5314,30 +5324,77 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
                     currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
-                    if (i == 1)
-                    {
-                        isFDFSrc1 = IS_TYPE_F32_F64(srcOpnd->getType());
-                    }
+
                     if (currInstExecSize[i] > getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + 1;
-                        isCompressedInst = true;
+                        currInstRegs[1][i] = currInstRegs[0][i] + 1;// (currInstExecSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        instSplit = true;
                     }
-                    else //Read suppression will be handled later
+                    else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
                     {
                         currInstRegs[1][i] = currInstRegs[0][i];
+                        isScalar[i] = true;
+                    }
+                    else
+                    {
+                        setInValidReg(currInstRegs[1][i]);
                     }
                 }
             }
         }
     }
 
-    if (isCompressedInst)
+    if (instSplit)
     {
         parent->G12BCStats.addSIMD8();
     }
 
-    //Kill previous read suppression candiadte if it wrote in DST
+    bool lastInstSplit = suppressRegs[4] == 1;
+
+    if (instSplit != lastInstSplit)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            setInValidReg(suppressRegs[i]);
+        }
+    }
+    else
+    {
+        //Read Suppression for current instruction
+        output << " R{";
+        for (int i = 0; i < 3; i++)
+        {
+            if (instSplit && i != 1)
+            {
+                continue;
+            }
+
+            if (!instSplit && i == 1)
+            {
+                continue;
+            }
+
+            if (isValidReg(suppressRegs[i]) &&
+                currInstRegs[0][i] == suppressRegs[i] && !isScalar[i])
+            {
+                setInValidReg(currInstRegs[0][i]);
+                setInValidReg(currInstRegs[1][i]);
+                output << "r" << suppressRegs[i] << ",";
+            }
+        }
+        output << "}";
+    }
+
+    if (instSplit)
+    {
+        suppressRegs[4] = 1;
+    }
+    else
+    {
+        suppressRegs[4] = 0;
+    }
+
+    //Kill all previous read suppression candiadte if it wrote in DST
     if (isValidReg(dstRegs[0]))
     {
         for (int i = 0; i < 4; i++)
@@ -5349,63 +5406,8 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    //Read Suppression from previous instruction
-    //Keep suppressRegs, if suppression happen
-    //Update suppression, and registers to be read.
-    // inst1: mad(8)   r10, r20, r20, r40
-    // inst2: mad(8)   r10, r30, r20, r50
-    // the suppression of r20 inst2 will happen
-    output << " R{";
-    for (int i = 0; i < 3; i++)
-    {
-        //Read suppression for src0, src1 and src2
-        if (isValidReg(suppressRegs[i]) &&
-            currInstRegs[0][i] == suppressRegs[i])
-        {
-            setInValidReg(currInstRegs[0][i]);
-            if (isCompressedInst &&
-                isLastInstCompressed && //Two GRF operand instructions
-                isFDFSrc1 &&
-                i == 1)
-            {
-                setInValidReg(currInstRegs[1][i]);
-                isSrc1Suppressed = true;
-            }
-            output << "r" << suppressRegs[i] << ",";
-        }
-        else
-        {
-            suppressRegs[i] = currInstRegs[0][i];
-        }
-    }
-    output << "}";
-
-    //Intra suppression for the first GRF
-    //Inter and intra will happen only once, if inter happen, intra wouldn't read
-    //Such as in following case, the src1 r20 of inst2 need be read because src0 r20 of inst2 is suppressed
-    // inst1: mad(8)   r10, r20, r30, r40
-    // inst2: mad(8)   r10, r20, r20, r50
-    // for this case, currInstRegs[0][j] is updated to invalid in this case because inter is handled first.
-    output << " IR{";
-    for (int i = 0; i < inst->getNumSrc(); i++)
-    {
-        if (isValidReg(currInstRegs[0][i]))
-        {
-            for (int k = 0; k < G4_MAX_SRCS; k++)
-            {
-                if (isValidReg(readRegs[0][k]) && readRegs[0][k] == currInstRegs[0][i])
-                {
-                    setInValidReg(currInstRegs[0][i]);
-                    output << "r" << readRegs[0][k] << ",";
-                }
-            }
-            readRegs[0][i] = currInstRegs[0][i];
-        }
-    }
-    output << "}";
-
-    suppressRegs[4] = isCompressedInst ? 1 : 0;
-
+    //No suppression, update the suppressRegs[0] for gen12lp
+    //suppressRegs[1], suppressRegs[2] will be updated with next instruction
     int conflictTimes = 0;
     for (int i = 0; i < 3; i++)
     {
@@ -5416,7 +5418,6 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    //Get the bank conflict for the first GRF instruction.
     if (candidateNum > 1)
     {
         conflictTimes = getConflictTimesForTGL(output, firstRegCandidate, sameConflictTimes, zeroOne, isTGLLP);
@@ -5426,7 +5427,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    if (isCompressedInst)
+    if (instSplit)
     {
         if (isValidReg(dstRegs[1]))
         {
@@ -5434,52 +5435,10 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
             {
                 if (suppressRegs[i] == dstRegs[1])
                 {
-                    //Should be no real overlap, only GRF level overlap may happen
                     setInValidReg(suppressRegs[i]);
                 }
             }
         }
-
-        output << " R{";
-        //Inter for the second instruction
-        for (int i = 0; i < 3; i++)
-        {
-            if (isSrc1Suppressed)
-            {
-                continue;
-            }
-            //Read suppression for src0, src1 and src2
-            if (isValidReg(suppressRegs[i]) &&
-                currInstRegs[1][i] == suppressRegs[i])
-            {
-                setInValidReg(currInstRegs[1][i]);
-                output << "r" << suppressRegs[i] << ",";
-            }
-            else
-            {
-                suppressRegs[i] = currInstRegs[1][i];
-            }
-        }
-        output << "}";
-
-        output << " IR{";
-        //Intra suppression for the second instruction
-        for (int i = 0; i < inst->getNumSrc(); i++)
-        {
-            if (isValidReg(currInstRegs[1][i]))
-            {
-                for (int k = 0; k < G4_MAX_SRCS; k++)
-                {
-                    if (isValidReg(readRegs[1][k]) && readRegs[1][k] == currInstRegs[1][i])
-                    {
-                        setInValidReg(currInstRegs[1][i]);
-                        output << "r" << readRegs[1][k] << ",";
-                    }
-                }
-                readRegs[1][i] = currInstRegs[1][i];
-            }
-        }
-        output << "}";
 
         candidateNum = 0;
         //For SIMD8, if any GRF0 of src1 or src2 of inst1 is GRF register
@@ -5508,7 +5467,15 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    if (conflictTimes != 0 || parent->builder->getOption(vISA_DumpAllBCInfo))
+    for (int i = 0; i < 3; i++)
+    {
+        if (isValidReg(currInstRegs[0][i]))
+        {
+            suppressRegs[i] = currInstRegs[0][i];
+        }
+    }
+
+    if (conflictTimes != 0)
     {
         output << " {";
         output << "BC=";
@@ -5520,19 +5487,6 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
     return conflictTimes;
 }
 
-/*
-* In Gen12lp, there are 8 bundles and 2 banks per HW thread.
-* Banks are divided according to EVEN / ODD of register index: 0101010101010101
-* There are 8 bundles per 16 registers : 0011223344556677
-* For two adjacent instructions : inst1 and inst2, inst1_src1(, inst1_src2) and inst2_src0 will be read in same cycle
-* Considered HW swapand read suppresion mechanisms
-* HW swap :
-*The origional GRF register reading sequence for a three source instruction is : src0 in cycle0and src1and src2 in cycle2.
-* HW swap mechanism detects the conflict between src1and src2, if there is a conflict, HW will read src1 in cycle0and src0and src2 in cycle1.
-* Note that :
-* 1. for SIMD16, HW swap only happens when detecting conflicts in first simd8's registers. conflict in second simd8 will not trigger swap.
-* 2. for SIMD16, when swapping happens, the src1and src0 of both simd8 instructions will be swapped.
-*/
 uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, int *suppressRegs, int *lastRegs, int &sameConflictTimes, int &twoSrcConflicts, int &simd16RS)
 {
     std::stringstream output;
@@ -5859,12 +5813,6 @@ void G4_BB::emitBasicInstructionIga(char* instSyntax, std::ostream& output, INST
     if (!inst->isLabel() && inst->opcode() < G4_NUM_OPCODE)
     {
         output << " //";
-
-        auto comments = inst->getComments();
-        if (comments != "")
-        {
-            output << " " << comments << ", ";
-        }
         emitInstId(output, inst->getLineNo(), inst->getCISAOff(), inst->getLexicalId(), inst->getGenOffset());
 
         if (getPlatformGeneration(platform) < PlatformGen::GEN12)
@@ -6154,7 +6102,7 @@ void G4_Kernel::computeChannelSlicing()
     std::unordered_map<G4_Declare*, std::bitset<32>> emaskRef;
     for (auto bb : fg)
     {
-        for (auto inst : *bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->isSend())
                 continue;
@@ -6940,7 +6888,7 @@ bool FlowGraph::convertJmpiToGoto()
                         auto pInst = builder->createBinOp(
                             G4_and, 1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
-                        bb->insertBefore(I, pInst);
+                        bb->insert(I, pInst);
                     }
                     else if (G4_Predicate::isAnyH(pCtrl))
                     {
@@ -6950,7 +6898,7 @@ bool FlowGraph::convertJmpiToGoto()
                         auto pInst = builder->createBinOp(
                             G4_and, 1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
-                        bb->insertBefore(I, pInst);
+                        bb->insert(I, pInst);
                     }
                     else
                     {
@@ -6961,7 +6909,7 @@ bool FlowGraph::convertJmpiToGoto()
                         auto pInst = builder->createBinOp(
                             G4_or, 1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
-                        bb->insertBefore(I, pInst);
+                        bb->insert(I, pInst);
                     }
 
                     // Adjust pred control to the new execution size and build the

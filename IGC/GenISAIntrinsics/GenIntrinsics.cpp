@@ -27,6 +27,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <Compiler/CodeGenPublic.h>
 #include "GenIntrinsics.h"
+
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -37,9 +38,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/ADT/StringMap.h>
 #include <llvm/CodeGen/ValueTypes.h>
 #include "common/LLVMWarningsPop.hpp"
+
 #include "../../inc/common/UFO/portable_compiler.h"
+
 #include <cstring>
-#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -87,11 +89,17 @@ struct IITDescriptor {
         AK_AnyPointer
     };
     unsigned getArgumentNumber() const {
-        IGC_ASSERT(Kind == Argument || Kind == ExtendArgument || Kind == TruncArgument || Kind == HalfVecArgument || Kind == SameVecWidthArgument || Kind == PtrToArgument || Kind == VecOfPtrsToElt);
+        assert(Kind == Argument || Kind == ExtendArgument ||
+            Kind == TruncArgument || Kind == HalfVecArgument ||
+            Kind == SameVecWidthArgument || Kind == PtrToArgument ||
+            Kind == VecOfPtrsToElt);
         return Argument_Info >> 3;
     }
     ArgKind getArgumentKind() const {
-        IGC_ASSERT(Kind == Argument || Kind == ExtendArgument || Kind == TruncArgument || Kind == HalfVecArgument || Kind == SameVecWidthArgument || Kind == PtrToArgument || Kind == VecOfPtrsToElt);
+        assert(Kind == Argument || Kind == ExtendArgument ||
+            Kind == TruncArgument || Kind == HalfVecArgument ||
+            Kind == SameVecWidthArgument || Kind == PtrToArgument ||
+            Kind == VecOfPtrsToElt);
         return (ArgKind)(Argument_Info & 7);
     }
 
@@ -176,7 +184,7 @@ static Type *DecodeFixedType(ArrayRef<GenISAIntrinsic::IITDescriptor> &Infos,
                             D.Pointer_AddressSpace);
   case IITDescriptor::Struct: {
     Type *Elts[5];
-    IGC_ASSERT_MESSAGE(D.Struct_NumElements <= 5, "Can't handle this yet");
+    assert(D.Struct_NumElements <= 5 && "Can't handle this yet");
     for (unsigned i = 0, e = D.Struct_NumElements; i != e; ++i)
       Elts[i] = DecodeFixedType(Infos, Tys, Context);
     return StructType::get(Context, makeArrayRef(Elts,D.Struct_NumElements));
@@ -197,8 +205,7 @@ static Type *DecodeFixedType(ArrayRef<GenISAIntrinsic::IITDescriptor> &Infos,
       return VectorType::getTruncatedElementVectorType(VTy);
 
     IntegerType *ITy = cast<IntegerType>(Ty);
-    IGC_ASSERT(nullptr != ITy);
-    IGC_ASSERT(ITy->getBitWidth() % 2 == 0);
+    assert(ITy->getBitWidth() % 2 == 0);
     return IntegerType::get(Context, ITy->getBitWidth() / 2);
   }
   case IITDescriptor::HalfVecArgument:
@@ -210,7 +217,7 @@ static Type *DecodeFixedType(ArrayRef<GenISAIntrinsic::IITDescriptor> &Infos,
     if (VectorType *VTy = dyn_cast<VectorType>(Ty)) {
       return VectorType::get(EltTy, int_cast<unsigned int>(VTy->getNumElements()));
     }
-    IGC_ASSERT_EXIT_MESSAGE(0, "unhandled");
+    llvm_unreachable("unhandled");
   }
   case IITDescriptor::PtrToArgument: {
     Type *Ty = Tys[D.getArgumentNumber()];
@@ -220,14 +227,13 @@ static Type *DecodeFixedType(ArrayRef<GenISAIntrinsic::IITDescriptor> &Infos,
       Type *Ty = Tys[D.getArgumentNumber()];
       VectorType *VTy = dyn_cast<VectorType>(Ty);
       if (!VTy)
-          IGC_ASSERT_EXIT_MESSAGE(0, "Expected an argument of Vector Type");
+          llvm_unreachable("Expected an argument of Vector Type");
       Type *EltTy = VTy->getVectorElementType();
       return VectorType::get(PointerType::getUnqual(EltTy),
           int_cast<unsigned int>(VTy->getNumElements()));
   }
  }
-  IGC_ASSERT_EXIT_MESSAGE(0, "unhandled");
-  return nullptr;
+  llvm_unreachable("unhandled");
 }
 
 
@@ -393,7 +399,7 @@ static void DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
     return;
   }
   }
-  IGC_ASSERT_EXIT_MESSAGE(0, "unhandled");
+  llvm_unreachable("unhandled");
 }
 
 // This defines the "Intrinsic::getIntrinsicForGCCBuiltin()" method.
@@ -446,7 +452,7 @@ static std::string getMangledTypeStr(Type* Ty) {
 
 
 std::string GenISAIntrinsic::getName(GenISAIntrinsic::ID id, ArrayRef<Type*> Tys) {
-  //IGC_ASSERT_MESSAGE(id < num_genisa_intrinsics, "Invalid intrinsic ID!");
+  //assert(id < num_genisa_intrinsics && "Invalid intrinsic ID!");
   if (id > (GenISAIntrinsic::ID)Intrinsic::num_intrinsics)
     id = (GenISAIntrinsic::ID)(id-Intrinsic::num_intrinsics);
   static const char * const Table[] = {
@@ -462,13 +468,6 @@ std::string GenISAIntrinsic::getName(GenISAIntrinsic::ID id, ArrayRef<Type*> Tys
     Result += "." + getMangledTypeStr(Tys[i]);
   }
   return Result;
-}
-
-GenISAIntrinsic::IntrinsicComments GenISAIntrinsic::getIntrinsicComments(
-    GenISAIntrinsic::ID id) {
-#define GET_INTRINSIC_COMMENTS_TABLE
-#include "IntrinsicGenISA.gen"
-#undef GET_INTRINSIC_COMMENTS_TABLE
 }
 
 FunctionType *GenISAIntrinsic::getType(LLVMContext &Context,
@@ -521,7 +520,7 @@ Function *GenISAIntrinsic::getDeclaration(
     IGCLLVM::Module* M = (IGCLLVM::Module*)Module;
 
     Function *F =
-        dyn_cast<Function>(
+        cast<Function>(
             M->getOrInsertFunction(
                 getName((GenISAIntrinsic::ID)(id-Intrinsic::num_intrinsics), Tys),
                 getType(
@@ -530,7 +529,6 @@ Function *GenISAIntrinsic::getDeclaration(
                     Tys),
                 getAttributes(M->getContext(),(GenISAIntrinsic::ID)(id - 1))));
 
-    IGC_ASSERT_MESSAGE(F, "getOrInsertFunction probably returned constant expression!");
     // Since Function::isIntrinsic() will return true due to llvm.* prefix,
     // Module::getOrInsertFunction fails to add the attributes.
     // explicitly adding the attribute to handle this problem.
@@ -577,21 +575,17 @@ void GenISAIntrinsic::getIntrinsicInfoTableEntries(
 }
 
 GenISAIntrinsic::ID GenISAIntrinsic::getIntrinsicID(const Function *F) {
-    IGC_ASSERT(nullptr != F);
     IGC::LLVMContextWrapper::SafeIntrinsicIDCacheTy* safeIntrinsicIDCache =
         &(static_cast<IGC::LLVMContextWrapper*>(&F->getContext())->m_SafeIntrinsicIDCache);
-    IGC_ASSERT(nullptr != safeIntrinsicIDCache);
 
     //If you do not find the function ptr as key corresponding to the GenISAIntrinsic::ID add the new key
     auto it = (*safeIntrinsicIDCache).find(F);
     if (it == (*safeIntrinsicIDCache).end()) {
-        const ValueName* const valueName = F->getValueName();
-        IGC_ASSERT(nullptr != valueName);
+        const ValueName *valueName = F->getValueName();
         GenISAIntrinsic::ID Id = no_intrinsic;
         llvm::StringRef prefix = getGenIntrinsicPrefix();
         llvm::StringRef Name = valueName->getKey();
-        IGC_ASSERT_MESSAGE(Name.size() > prefix.size(), "Not a valid gen intrinsic name signature");
-        IGC_ASSERT_MESSAGE(Name.startswith(prefix), "Not a valid gen intrinsic name signature");
+        assert(Name.size()>prefix.size() && Name.startswith(prefix) && "Not a valid gen intrinsic name signature\n");
         Id = lookupGenIntrinsicID(Name.data(), Name.size());
         (*safeIntrinsicIDCache)[F] = Id;
         return Id;

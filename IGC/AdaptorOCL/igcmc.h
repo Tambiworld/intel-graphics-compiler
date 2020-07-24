@@ -101,9 +101,9 @@ struct cmc_kernel_info_v2 {
     uint32_t StatelessPrivateMemSize = 0;
 
     /// number of format strings in the kernel
-    unsigned num_print_strings = 0;
+    unsigned num_print_strings;
     /// The kernel format string storage
-    cmc_ocl_print_string *print_string_descs = nullptr;
+    cmc_ocl_print_string *print_string_descs;
 
     struct TableInfo {
         void *Buf = nullptr;

@@ -2196,21 +2196,12 @@ set(IGC_BUILD__PROJ_NAME_PREFIX "")
   set(IGC_BUILD__SPIRV_ENABLED ON)
 
 
-# Enable vector compiler for Linux and Windows
-# If user already defined this, honor decision
-if(NOT DEFINED IGC_BUILD__VC_ENABLED)
-  if(LLVM_ON_UNIX OR LLVM_ON_WIN32)
-    set(IGC_BUILD__VC_ENABLED ON)
-  endif()
-endif()
-
 
 # ======================================== Path helper variables =======================================
 
 
 set(IGC_BUILD__IGC_SRC_DIR          "${IGC_SOURCE_DIR}")
 set(IGC_BUILD__IGC_COMMON_DIR       "${IGC_BUILD__IGC_SRC_DIR}/common")
-
 
 set(IGC_BUILD__IGC_BIN_DIR          "${IGC_BINARY_DIR}")
 
@@ -2806,37 +2797,37 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -msse4.2
           -Wno-unknown-pragmas
           -fPIC
-    )
-    igc_config_flag_apply_settings(
+      )
+      igc_config_flag_apply_settings(
         CompilerOptions
         "${_compilerFlagName}"
         PATTERN "${IGC_BUILD__RELEASE_PATTERN}"
         SET_RAW
           -D_FORTIFY_SOURCE=2
           -fstack-protector
-    )
-    if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
-      igc_config_flag_apply_settings(
-          CompilerOptions
-          "${_compilerFlagName}"
-          ALL_PATTERN ""
-          SET_RAW
-            -finline-functions
       )
-    endif()
-    if(NOT _igc_compiler_is_clang)
-      set(flags -funswitch-loops -Wno-maybe-uninitialized)
-      if(NOT ANDROID)
-        list(APPEND flags -lrt)
+      if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          -finline-functions
+      )
       endif()
-      igc_config_flag_apply_settings(
-          CompilerOptions
-          "${_compilerFlagName}"
-          ALL_PATTERN ""
-          SET_RAW
-            ${flags}
+      if(NOT _igc_compiler_is_clang)
+        set(flags -funswitch-loops -Wno-maybe-uninitialized)
+        if(NOT ANDROID)
+          list(APPEND flags -lrt)
+        endif()
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          ${flags}
       )
-    endif()
+      endif()
   elseif(_igc_compiler_is_clang)
     igc_config_flag_apply_settings(
         CompilerOptions
@@ -2852,16 +2843,16 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
         -finline
         -fkeep-inline-functions
         -msse4.2
-    )
-    if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
-      igc_config_flag_apply_settings(
-          CompilerOptions
-         "${_compilerFlagName}"
-          ALL_PATTERN ""
-          SET_RAW
-            -finline-functions
       )
-    endif()
+      if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          -finline-functions
+      )
+      endif()
   endif()
 endforeach()
 
@@ -3087,12 +3078,6 @@ if(IGC_BUILD__SPIRV_ENABLED)
     )
 endif()
 
-#VC OPT switch on/off
-if(NOT IGC_BUILD__VC_ENABLED)
-  set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
-      IGC_VC_DISABLED
-    )
-endif()
   set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
       _SCL_SECURE_NO_WARNINGS
       _CRT_SECURE_NO_WARNINGS
@@ -3460,13 +3445,6 @@ if(LLVM_ON_WIN32
 
 endif()
 
-if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
-  add_subdirectory(CMFE)
-endif()
-
-if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
-  add_subdirectory(VectorCompiler)
-endif()
 
 add_subdirectory(Compiler)
 add_subdirectory(DriverInterface)
@@ -3759,12 +3737,6 @@ list(APPEND _targetLinkLineCommon zebinlib)
       )
   endif()
 
-  if(IGC_BUILD__VC_ENABLED)
-    list(APPEND _targetLinkLineCommon
-      ${IGC_BUILD__PROJ_VC_LIBS_TO_LINK}
-    )
-  endif()
-
   list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__START_GROUP}"
       ${IGC_BUILD__LLVM_LIBS_TO_LINK}
@@ -3860,9 +3832,6 @@ if(_targetIsStatic)
         ${COMMON_CLANG}
         ${CMAKE_DL_LIBS}
       )
-    if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
-      target_link_libraries("${IGC_BUILD__PROJ__fcl_dll}" AdaptorCM)
-    endif()
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY LINK_INTERFACE_LIBRARIES "")
     set("IGC_BUILD__LINK_LINE__fcl_dll"

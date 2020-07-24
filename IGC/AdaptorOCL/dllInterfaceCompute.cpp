@@ -55,11 +55,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "AdaptorOCL/OCL/sp/gtpin_igc_ocl.h"
 #include "AdaptorOCL/igcmc.h"
 #include "AdaptorOCL/cmc.h"
-#include "common/LLVMWarningsPush.hpp"
-#include <llvm/ADT/ScopeExit.h>
-#include "VectorCompiler/include/vc/Support/StatusCode.h"
-#include "VectorCompiler/include/vc/GenXCodeGen/GenXWrapper.h"
-#include "common/LLVMWarningsPop.hpp"
 
 #include <iStdLib/MemCopy.h>
 
@@ -825,69 +820,6 @@ static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
     const IGC::CPlatform& IGCPlatform,
     float profilingTimerResolution);
 
-#if !defined(WDDM_LINUX)
-static std::error_code TranslateBuildVC(
-    const STB_TranslateInputArgs* pInputArgs,
-    STB_TranslateOutputArgs* pOutputArgs, TB_DATA_FORMAT inputDataFormatTemp,
-    const IGC::CPlatform& IGCPlatform, float profilingTimerResolution);
-#endif //  !defined(WDDM_LINUX)
-
-#if !defined(WDDM_LINUX)
-struct VcPayloadInfo {
-    bool IsValid = false;
-    uint64_t VcOptsOffset = 0;
-    uint64_t IrSize = 0;
-};
-VcPayloadInfo tryExtractPayload(char* pInput, size_t inputSize) {
-
-    // Payload format:
-    // |-vc-codegen|c-str llvm-opts|i64(IR size)|i64(Payload size)|-vc-codegen|
-    //
-    // Should be in sync with:
-    //  Source/IGC/AdaptorOCL/ocl_igc_interface/impl/fcl_ocl_translation_ctx_impl.cpp
-
-    // Check for availability of "-vc-codegen" marker at the end
-    const std::string CodegenMarker = "-vc-codegen";
-    // make sure that we also have a room for 2 i64 size items
-    if (inputSize < (CodegenMarker.size() + 2 * sizeof(uint64_t)))
-        return {};
-    const char* const pInputEnd = pInput + inputSize;
-    if (std::memcmp(pInputEnd - CodegenMarker.size(),
-                    CodegenMarker.data(), CodegenMarker.size()) != 0)
-        return {};
-
-    // Read IR and Payload sizes. We already ensured that we have the room
-    uint64_t IrSize;
-    uint64_t PayloadSize;
-    const char* pIrSizeBuff = pInputEnd - CodegenMarker.size() - 2 * sizeof(uint64_t);
-    const char* pPayloadSizeBuff = pInputEnd - CodegenMarker.size() - 1 * sizeof(uint64_t);
-    std::memcpy(&IrSize, pIrSizeBuff, sizeof(IrSize));
-    std::memcpy(&PayloadSize, pPayloadSizeBuff, sizeof(PayloadSize));
-    if (inputSize != (PayloadSize + IrSize))
-        return {};
-
-    // Search for the start of payload, it should start with "-vc-codegen" marker
-    const char* const pIREnd = pInputEnd - PayloadSize;
-    if (std::memcmp(pIREnd, CodegenMarker.data(), CodegenMarker.size()) != 0)
-        return {};
-
-    // Make sure that we have a zero-terminated c-string (vc-options are encoded as such)
-    auto NullPos = std::find(pIREnd, pInputEnd, 0);
-    if (NullPos == pInputEnd)
-        return {};
-    // Consistency check, see the Payload format
-    if ((NullPos + 1) != pIrSizeBuff)
-        return {};
-
-    VcPayloadInfo Result;
-    Result.VcOptsOffset = (pIREnd + CodegenMarker.size()) - pInput;
-    Result.IrSize = IrSize;
-    Result.IsValid = true;
-
-    return Result;
-}
-#endif //  !defined(WDDM_LINUX)
-
 bool TranslateBuild(
     const STB_TranslateInputArgs* pInputArgs,
     STB_TranslateOutputArgs* pOutputArgs,
@@ -896,16 +828,6 @@ bool TranslateBuild(
     float profilingTimerResolution)
 {
     if (pInputArgs->pOptions) {
-#if !defined(WDDM_LINUX)
-        std::error_code Status =
-            TranslateBuildVC(pInputArgs, pOutputArgs, inputDataFormatTemp,
-                             IGCPlatform, profilingTimerResolution);
-        if (!Status)
-            return true;
-        // If vc codegen option was not specified, then vc was not called.
-        if (static_cast<vc::errc>(Status.value()) != vc::errc::not_vc_codegen)
-            return false;
-#endif // !defined(WDDM_LINUX)
         static const char* CMC = "-cmc";
         if (strstr(pInputArgs->pOptions, CMC) != nullptr)
             return TranslateBuildCM(pInputArgs,
@@ -1515,151 +1437,5 @@ static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
     SetErrorMessage(Err, *pOutputArgs);
     return false;
 }
-
-#if !defined(WDDM_LINUX)
-
-static void adjustPlatformVC(const IGC::CPlatform& IGCPlatform,
-                             vc::CompileOptions& Opts)
-{
-    Opts.CPUStr = cmc::getPlatformStr(IGCPlatform.getPlatformInfo());
-    Opts.WATable = std::make_unique<WA_TABLE>(IGCPlatform.getWATable());
-}
-
-static void adjustFileTypeVC(TB_DATA_FORMAT DataFormat,
-                             vc::CompileOptions& Opts)
-{
-    switch (DataFormat)
-    {
-    case TB_DATA_FORMAT::TB_DATA_FORMAT_SPIR_V:
-        Opts.FType = vc::FileType::SPIRV;
-        return;
-    default:
-        llvm_unreachable("Data format is not supported yet");
-    }
-}
-
-static void adjustOptLevelVC(vc::CompileOptions& Opts)
-{
-    if (IGC_IS_FLAG_ENABLED(VCOptimizeNone))
-        Opts.OptLevel = vc::OptimizerLevel::None;
-}
-
-static void adjustOptionsVC(const IGC::CPlatform& IGCPlatform,
-                            TB_DATA_FORMAT DataFormat, vc::CompileOptions& Opts)
-{
-    adjustPlatformVC(IGCPlatform, Opts);
-    adjustFileTypeVC(DataFormat, Opts);
-    adjustOptLevelVC(Opts);
-}
-
-static std::error_code getErrorVC(llvm::Error Err,
-                                  STB_TranslateOutputArgs* pOutputArgs)
-{
-    std::error_code Status;
-    llvm::handleAllErrors(
-        std::move(Err), [&Status, pOutputArgs](const llvm::ErrorInfoBase& EI) {
-            Status = EI.convertToErrorCode();
-            // Some tests check for build log when everything is ok.
-            // So let's not even try to touch things if we were not called.
-            if (static_cast<vc::errc>(Status.value()) == vc::errc::not_vc_codegen)
-              return;
-            SetErrorMessage(EI.message(), *pOutputArgs);
-        });
-    return Status;
-}
-
-static void outputBinaryVC(llvm::StringRef Binary,
-                           STB_TranslateOutputArgs* pOutputArgs)
-{
-    size_t BinarySize = static_cast<size_t>(Binary.size());
-    char* pBinaryOutput = new char[BinarySize];
-    memcpy_s(pBinaryOutput, BinarySize, Binary.data(), BinarySize);
-    pOutputArgs->OutputSize = static_cast<uint32_t>(BinarySize);
-    pOutputArgs->pOutput = pBinaryOutput;
-}
-
-static std::error_code TranslateBuildVC(
-    const STB_TranslateInputArgs* pInputArgs,
-    STB_TranslateOutputArgs* pOutputArgs, TB_DATA_FORMAT inputDataFormatTemp,
-    const IGC::CPlatform& IGCPlatform, float profilingTimerResolution)
-{
-#if IGC_VC_DISABLED
-    SetErrorMessage("IGC VC explicitly disabled in build", *pOutputArgs);
-    return false;
-#else
-
-    llvm::StringRef ApiOptions{pInputArgs->pOptions, pInputArgs->OptionsSize};
-    llvm::StringRef InternalOptions{pInputArgs->pInternalOptions,
-                                    pInputArgs->InternalOptionsSize};
-    auto pInput = pInputArgs->pInput;
-    size_t InputSize = pInputArgs->InputSize;
-
-    auto NewPathPayload = tryExtractPayload(pInputArgs->pInput,
-                                            pInputArgs->InputSize);
-    if (NewPathPayload.IsValid) {
-        ApiOptions = "-vc-codegen";
-        InternalOptions = pInputArgs->pInput + NewPathPayload.VcOptsOffset;
-        InputSize = static_cast<size_t>(NewPathPayload.IrSize);
-    }
-
-    auto ExpOptions = vc::ParseOptions(ApiOptions, InternalOptions);
-    if (!ExpOptions)
-        return getErrorVC(ExpOptions.takeError(), pOutputArgs);
-
-    // Reset options when everything is done here.
-    // This is needed to not interfere with subsequent translations.
-    const auto ClOptGuard =
-        llvm::make_scope_exit([]() { llvm::cl::ResetAllOptionOccurrences(); });
-
-    vc::CompileOptions& Opts = ExpOptions.get();
-    adjustOptionsVC(IGCPlatform, inputDataFormatTemp, Opts);
-
-    llvm::ArrayRef<char> Input{pInput, InputSize};
-    auto ExpOutput = vc::Compile(Input, Opts);
-    if (!ExpOutput)
-        return getErrorVC(ExpOutput.takeError(), pOutputArgs);
-    vc::CompileOutput& Res = ExpOutput.get();
-
-    auto Visitor = [&IGCPlatform, pOutputArgs](auto&& CompileResult) {
-        using Ty = std::decay_t<decltype(CompileResult)>;
-        if constexpr (std::is_same_v<Ty, vc::cm::CompileOutput>)
-        {
-            outputBinaryVC(CompileResult.IsaBinary, pOutputArgs);
-        }
-        else if constexpr (std::is_same_v<Ty, vc::ocl::CompileOutput>)
-        {
-            iOpenCL::CGen8CMProgram CMProgram{IGCPlatform.getPlatformInfo()};
-            vc::createBinary(CMProgram, CompileResult.Kernels);
-            if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
-            {
-                llvm::SmallVector<char, 0> ProgramBinary;
-                llvm::raw_svector_ostream ProgramBinaryOS{ProgramBinary};
-                CMProgram.GetZEBinary(ProgramBinaryOS, CompileResult.PointerSizeInBytes);
-                llvm::StringRef BinaryRef(ProgramBinary.data(), ProgramBinary.size());
-                outputBinaryVC(BinaryRef, pOutputArgs);
-            }
-            else
-            {
-                CMProgram.CreateKernelBinaries();
-                Util::BinaryStream ProgramBinary;
-                CMProgram.GetProgramBinary(ProgramBinary,
-                                           CompileResult.PointerSizeInBytes);
-                llvm::StringRef BinaryRef(ProgramBinary.GetLinearPointer(),
-                                          ProgramBinary.Size());
-                outputBinaryVC(BinaryRef, pOutputArgs);
-            }
-        }
-        else
-        {
-            static_assert(!sizeof(Ty), "One of compile output is not visited");
-        }
-    };
-
-    std::visit(Visitor, Res);
-
-    return {};
-#endif
-}
-#endif // !defined(WDDM_LINUX)
 
 } // namespace TC

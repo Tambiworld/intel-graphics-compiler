@@ -72,7 +72,7 @@ bool isSupportedAggregateArgument(Argument* arg)
     return false;
 }
 
-AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : ModulePass(ID)
+AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : FunctionPass(ID)
 {
     initializeAggregateArgumentsAnalysisPass(*PassRegistry::getPassRegistry());
 }
@@ -82,46 +82,39 @@ AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : ModulePass(ID)
 // arguments into multiple implicit basic type arguments.  This pass
 // must be run after function inlining.
 //
-bool AggregateArgumentsAnalysis::runOnModule(Module& M)
+bool AggregateArgumentsAnalysis::runOnFunction(Function& F)
 {
-    bool changed = false;
-    m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
-
-    for (Function& F : M)
+    if (F.isDeclaration())
     {
-        if (F.isDeclaration())
-        {
-            continue;
-        }
-
-        if (!isEntryFunc(m_pMdUtils, &F))
-        {
-            continue;
-        }
-
-        m_pDL = &F.getParent()->getDataLayout();
-
-        Function::arg_iterator argument = F.arg_begin();
-        for (; argument != F.arg_end(); ++argument)
-        {
-            Argument* arg = &(*argument);
-
-            if (!isSupportedAggregateArgument(arg))
-            {
-                continue;
-            }
-            m_argList.clear();
-
-            Type* type = arg->getType()->getPointerElementType();
-            IGC_ASSERT(m_pDL->getStructLayout(cast<StructType>(type))->getSizeInBytes() < UINT_MAX);
-            addImplictArgs(type, 0);
-            ImplicitArgs::addStructArgs(F, arg, m_argList, m_pMdUtils);
-            changed = true;
-        }
+        return false;
     }
 
-    if (changed)
-        m_pMdUtils->save(M.getContext());
+    if (!isEntryFunc(getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils(), &F))
+    {
+        return false;
+    }
+
+    m_pDL = &F.getParent()->getDataLayout();
+
+    bool changed = false;
+
+    Function::arg_iterator argument = F.arg_begin();
+    for (; argument != F.arg_end(); ++argument)
+    {
+        Argument* arg = &(*argument);
+
+        if (!isSupportedAggregateArgument(arg))
+        {
+            continue;
+        }
+        m_argList.clear();
+
+        Type* type = arg->getType()->getPointerElementType();
+        IGC_ASSERT(m_pDL->getStructLayout(cast<StructType>(type))->getSizeInBytes() < UINT_MAX);
+        addImplictArgs(type, 0);
+        ImplicitArgs::addStructArgs(F, arg, m_argList, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
+        changed = true;
+    }
 
     return changed;
 }

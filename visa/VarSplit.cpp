@@ -38,7 +38,7 @@ void VarSplitPass::buildPreVerify()
 {
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->getDst())
             {
@@ -91,7 +91,7 @@ void VarSplitPass::verify()
     // create parent->child mapping
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->isSplitIntrinsic())
             {
@@ -118,7 +118,7 @@ void VarSplitPass::verify()
     std::unordered_map<G4_Declare*, unsigned int> parentDefCount;
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             auto dst = inst->getDst();
 
@@ -181,7 +181,7 @@ void VarSplitPass::verifyOverlap()
     unsigned int numSplitLeft = 0;
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->isSplitIntrinsic())
             {
@@ -285,7 +285,7 @@ void VarSplitPass::findSplitCandidates()
     // Find all dcls that can be split in to smaller chunks
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->getDst() && inst->getDst()->getTopDcl())
             {
@@ -329,8 +329,7 @@ void VarSplitPass::findSplitCandidates()
     for (auto itemIt = splitVars.begin(); itemIt != splitVars.end(); itemIt++)
     {
         auto& item = (*itemIt);
-        if (item.second.numDefs != 1 || !item.second.candidateDef ||
-            !item.second.isDefUsesInSameBB())
+        if (item.second.numDefs != 1 || !item.second.candidateDef)
         {
             item.second.legitCandidate = false;
             continue;
@@ -400,7 +399,7 @@ void VarSplitPass::findSplitCandidates()
     std::unordered_map<G4_INST*, unsigned int> instId;
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             instId[inst] = instId.size();
         }
@@ -523,7 +522,7 @@ void VarSplitPass::split()
             auto intrin = kernel.fg.builder->createIntrinsicInst(nullptr, Intrinsic::Split, esize, dstRgn, srcRgn, nullptr, nullptr,
                 item.second.def.first->getInst()->getOption() | G4_InstOption::InstOpt_WriteEnable, item.second.def.first->getInst()->getLineNo());
             intrin->setCISAOff(item.second.def.first->getInst()->getCISAOff());
-            item.second.def.second->insertBefore(it, intrin);
+            item.second.def.second->insert(it, intrin);
             splitDcls.push_back(std::make_tuple(lb, rb, splitDcl));
             IRchanged = true;
 #ifdef DEBUG_VERBOSE_ON
@@ -597,7 +596,7 @@ void VarSplitPass::replaceIntrinsics()
     // Replace intrinsic.split with mov
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst :*bb)
+        for (auto inst : bb->getInstList())
         {
             if (inst->isSplitIntrinsic())
             {

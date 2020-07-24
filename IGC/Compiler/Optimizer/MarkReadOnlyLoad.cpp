@@ -106,36 +106,29 @@ bool MarkReadOnlyLoad::runOnFunction(Function& F)
 
 void MarkReadOnlyLoad::visitLoadInst(LoadInst& LI)
 {
+    Value* ldPtr = LI.getPointerOperand();
     bool isRO = false;
 
-    if (LI.getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT)
+    Value* srcPtr = TracePointerSource(ldPtr);
+    if (srcPtr && isa<GenIntrinsicInst>(srcPtr))
     {
-        isRO = true;
-    }
-    else if (auto *srcPtr = TracePointerSource(LI.getPointerOperand()))
-    {
-        if (isa<GenIntrinsicInst>(srcPtr))
-        {
-            unsigned bufId;
-            BufferType bufTy;
-            BufferAccessType accTy;
-            bool needBufferOffset; // Unused
+        unsigned bufId;
+        BufferType bufTy;
+        BufferAccessType accTy;
+        bool needBufferOffset; // Unused
 
-            // check whether we are doing read only access on buffer (e.g. on UAV)
-            if (GetResourcePointerInfo(
-                srcPtr, bufId, bufTy, accTy, needBufferOffset))
+        // check whether we are doing read only access on buffer (e.g. on UAV)
+        if (GetResourcePointerInfo(srcPtr, bufId, bufTy, accTy, needBufferOffset))
+        {
+            if (accTy == BufferAccessType::ACCESS_READ)
             {
-                if (accTy == BufferAccessType::ACCESS_READ)
-                {
-                    isRO = true;
-                }
+                isRO = true;
             }
         }
     }
 
     if (isRO)
     {
-        m_changed = true;
         LI.setMetadata(LLVMContext::MD_invariant_load, m_mdNode);
     }
 }

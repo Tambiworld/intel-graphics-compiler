@@ -104,6 +104,7 @@ namespace IGC
         ConstantPlacement.clear();
         PairOutputMap.clear();
         UniformBools.clear();
+        StructValueInsertMap.clear();
 
         delete[] m_blocks;
         m_blocks = nullptr;
@@ -771,7 +772,7 @@ namespace IGC
         return std::make_tuple(LHS, isSignedDst, true);
     }
 
-    bool CodeGenPatternMatch::MatchIntegerTruncSatModifier(llvm::SelectInst& I) {
+    bool CodeGenPatternMatch::MatchIntegerSatModifier(llvm::SelectInst& I) {
         // Only match BYTE or WORD.
         if (!I.getType()->isIntegerTy(8) && !I.getType()->isIntegerTy(16))
             return false;
@@ -947,8 +948,8 @@ namespace IGC
 
     void CodeGenPatternMatch::visitSelectInst(SelectInst& I)
     {
-        bool match = MatchFloatingPointSatModifier(I) ||
-            MatchIntegerTruncSatModifier(I) ||
+        bool match = MatchSatModifier(I) ||
+            MatchIntegerSatModifier(I) ||
             MatchAbsNeg(I) ||
             MatchFPToIntegerWithSaturation(I) ||
             MatchMinMax(I) ||
@@ -1111,11 +1112,7 @@ namespace IGC
                 match = MatchSampleDerivative(*CI);
                 break;
             case GenISAIntrinsic::GenISA_fsat:
-                match = MatchFloatingPointSatModifier(I);
-                break;
-            case GenISAIntrinsic::GenISA_usat:
-            case GenISAIntrinsic::GenISA_isat:
-                match = MatchIntegerSatModifier(I);
+                match = MatchSatModifier(I);
                 break;
             case GenISAIntrinsic::GenISA_WaveShuffleIndex:
                 match = MatchRegisterRegion(*CI) ||
@@ -1209,7 +1206,7 @@ namespace IGC
             break;
         case Intrinsic::maxnum:
         case Intrinsic::minnum:
-            match = MatchFloatingPointSatModifier(I) ||
+            match = MatchSatModifier(I) ||
                 MatchModifier(I);
             break;
         default:
@@ -1343,6 +1340,14 @@ namespace IGC
         MatchDbgInstruction(I);
     }
 
+    void CodeGenPatternMatch::visitInsertValueInst(InsertValueInst& I)
+    {
+        if (!MatchCopyToStruct(&I))
+        {
+            IGC_ASSERT_MESSAGE(0, "Unknown `insertvalue` instruction!");
+        }
+    }
+
     void CodeGenPatternMatch::visitExtractValueInst(ExtractValueInst& I) {
         bool Match = false;
 
@@ -1359,9 +1364,98 @@ namespace IGC
         Match = matchAddPair(&I) ||
             matchSubPair(&I) ||
             matchMulPair(&I) ||
-            matchPtrToPair(&I);
+            matchPtrToPair(&I) ||
+            MatchCopyFromStruct(&I);
 
         IGC_ASSERT_MESSAGE(Match, "Unknown `extractvalue` instruction!");
+    }
+
+    bool CodeGenPatternMatch::MatchCopyToStruct(InsertValueInst* II)
+    {
+        if (II->getNumIndices() != 1)
+            return false;
+
+        // Find the final insertvalue instruction, this will be
+        // the instruction we map to the VISA struct variable.
+        // Matches the following type of sequence:
+        //  %struct.S = type { i32, i32 }
+        //  % 3 = insertvalue % struct.S undef, i32 % 0, 0
+        //  % 4 = insertvalue % struct.S % 3, i32 % 2, 1   <--- Mapped Instruction
+        InsertValueInst* baseInst = II;
+        while (true)
+        {
+            Value* user = *baseInst->user_begin();
+            if (baseInst->getNumUses() != 1)
+                return false;
+            else if (InsertValueInst* inst = dyn_cast<InsertValueInst>(user))
+                baseInst = inst;
+            else
+                break;
+        }
+        IGC_ASSERT(baseInst);
+
+        auto Iter = StructValueInsertMap.find(baseInst);
+        if (Iter != StructValueInsertMap.end())
+        {
+            // Already handled for this set of insertvalue instructions
+            return true;
+        }
+
+        // Find the list of all source values and indices inserted for this struct
+        std::vector<std::pair<SSource, unsigned>> srcList;
+        Value* initValue = baseInst;
+        while (true)
+        {
+            if (InsertValueInst* inst = dyn_cast<InsertValueInst>(initValue))
+            {
+                srcList.push_back(std::make_pair(GetSource(inst->getOperand(1), false, false), *inst->idx_begin()));
+                initValue = inst->getOperand(0);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        Constant* constInit = dyn_cast<Constant>(initValue);
+        StructValueInsertMap[baseInst] = std::make_pair(constInit, srcList);
+
+        struct AddCopyStructPattern : public Pattern {
+            InsertValueInst* inst;
+            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
+                Pass->EmitCopyToStruct(inst, DstMod);
+            }
+        };
+
+        AddCopyStructPattern* Pat = new (m_allocator) AddCopyStructPattern();
+        Pat->inst = baseInst;
+        AddPattern(Pat);
+
+        return true;
+    }
+
+    bool CodeGenPatternMatch::MatchCopyFromStruct(ExtractValueInst* EI)
+    {
+        if (EI->getNumIndices() != 1)
+            return false;
+        if (GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(EI->getOperand(0)))
+            return false;
+
+        struct AddReadStructPattern : public Pattern {
+            Value* value;
+            unsigned idx;
+            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
+                Pass->EmitCopyFromStruct(value, idx, DstMod);
+            }
+        };
+
+        AddReadStructPattern* Pat = new (m_allocator) AddReadStructPattern();
+        Pat->value = EI->getOperand(0);
+        Pat->idx = *EI->idx_begin();
+        AddPattern(Pat);
+
+        MarkAsSource(EI->getOperand(0));
+        return true;
     }
 
     bool CodeGenPatternMatch::matchAddPair(ExtractValueInst* Ex) {
@@ -3083,13 +3177,12 @@ namespace IGC
         return true;
     }
 
-    bool CodeGenPatternMatch::MatchFloatingPointSatModifier(llvm::Instruction& I)
+    bool CodeGenPatternMatch::MatchSatModifier(llvm::Instruction& I)
     {
         struct SatPattern : Pattern
         {
             Pattern* pattern;
             SSource source;
-            bool isUnsigned;
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
                 DstModifier mod = modifier;
@@ -3106,8 +3199,7 @@ namespace IGC
         };
         bool match = false;
         llvm::Value* source = nullptr;
-        bool isUnsigned = false;
-        if (isSat(&I, source, isUnsigned))
+        if (isSat(&I, source))
         {
             SatPattern* satPattern = new (m_allocator) SatPattern();
             if (llvm::Instruction * inst = llvm::dyn_cast<Instruction>(source))
@@ -3133,101 +3225,6 @@ namespace IGC
                 gatherUniformBools(source);
             }
             AddPattern(satPattern);
-        }
-        return match;
-    }
-
-    bool CodeGenPatternMatch::MatchIntegerSatModifier(llvm::Instruction& I)
-    {
-        // a default pattern
-        struct SatPattern : Pattern
-        {
-            Pattern* pattern;
-            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
-            {
-                DstModifier mod = modifier;
-                mod.sat = true;
-                pattern->Emit(pass, mod);
-            }
-        };
-
-        // a special pattern is required because of the fact that the instruction works on unsigned values
-        // whereas the default type is signed for arithmetic instructions
-        struct UAddPattern : Pattern
-        {
-            BinaryOperator* inst;
-
-            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
-            {
-                DstModifier mod = modifier;
-                mod.sat = true;
-                pass->EmitUAdd(inst, modifier);
-            }
-        };
-
-        struct IntegerSatTruncPattern : public Pattern {
-            SSource src;
-            bool isSigned;
-            virtual void Emit(EmitPass* pass, const DstModifier& dstMod)
-            {
-                pass->EmitIntegerTruncWithSat(isSigned, isSigned, src, dstMod);
-            }
-        };
-
-        bool match = false;
-        llvm::Value* source = nullptr;
-        bool isUnsigned = false;
-        if (isSat(&I, source, isUnsigned))
-        {
-            IGC_ASSERT(llvm::isa<Instruction>(source));
-
-            // As an heuristic we only match saturate if the instruction has one use
-            // to avoid duplicating expensive instructions and increasing reg pressure
-            // without improve code quality this may be refined in the future
-            if (llvm::Instruction* sourceInst = llvm::cast<llvm::Instruction>(source);
-                sourceInst->hasOneUse() && SupportsSaturate(sourceInst))
-            {
-                if (llvm::BinaryOperator* binaryOpInst = llvm::dyn_cast<llvm::BinaryOperator>(source);
-                    binaryOpInst && (binaryOpInst->getOpcode() == llvm::BinaryOperator::BinaryOps::Add) && isUnsigned)
-                {
-                    match = true;
-                    UAddPattern* uAddPattern = new (m_allocator) UAddPattern();
-                    uAddPattern->inst = binaryOpInst;
-                    AddPattern(uAddPattern);
-                }
-                else if (binaryOpInst && (binaryOpInst->getOpcode() == llvm::BinaryOperator::BinaryOps::Add) && !isUnsigned)
-                {
-                    match = true;
-                    SatPattern* satPattern = new (m_allocator) SatPattern();
-                    satPattern->pattern = Match(*sourceInst);
-                    AddPattern(satPattern);
-                }
-                else if (llvm::TruncInst* truncInst = llvm::dyn_cast<llvm::TruncInst>(source);
-                    truncInst)
-                {
-                    match = true;
-                    IntegerSatTruncPattern* satPattern = new (m_allocator) IntegerSatTruncPattern();
-                    satPattern->isSigned = !isUnsigned;
-                    satPattern->src = GetSource(truncInst->getOperand(0), !isUnsigned, false);
-                    AddPattern(satPattern);
-                }
-                else if (llvm::GenIntrinsicInst * genIsaInst = llvm::dyn_cast<llvm::GenIntrinsicInst>(source);
-                    genIsaInst &&
-                    (genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_ss ||
-                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_su ||
-                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_uu ||
-                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_us))
-                {
-                    match = true;
-                    SatPattern* satPattern = new (m_allocator) SatPattern();
-                    satPattern->pattern = Match(*sourceInst);
-                    AddPattern(satPattern);
-                }
-                else
-                {
-                    IGC_ASSERT_MESSAGE(0, "An undefined pattern match");
-                }
-            }
         }
         return match;
     }
@@ -4515,22 +4512,19 @@ namespace IGC
         return false;
     }
 
-    bool isSat(llvm::Instruction* sat, llvm::Value*& source, bool& isUnsigned)
+    bool isSat(llvm::Instruction* sat, llvm::Value*& source)
     {
         bool found = false;
         llvm::Value* sources[2] = { 0 };
-        bool floatMatch = sat->getType()->isFloatingPointTy();
+        bool typeMatch = sat->getType()->isFloatingPointTy();
+
         GenIntrinsicInst* intrin = dyn_cast<GenIntrinsicInst>(sat);
-        if (intrin &&
-            (intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_fsat ||
-            intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_usat ||
-            intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_isat))
+        if (intrin && intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_fsat)
         {
             source = intrin->getOperand(0);
             found = true;
-            isUnsigned = intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_usat;
         }
-        else if (floatMatch && isMax(sat, sources[0], sources[1]))
+        else if (typeMatch && isMax(sat, sources[0], sources[1]))
         {
             for (int i = 0; i < 2; i++)
             {
@@ -4545,7 +4539,6 @@ namespace IGC
                             {
                                 found = true;
                                 source = maxSources[1 - j];
-                                isUnsigned = false;
                                 break;
                             }
                         }
@@ -4554,7 +4547,7 @@ namespace IGC
                 }
             }
         }
-        else if (floatMatch && isMin(sat, sources[0], sources[1]))
+        else if (typeMatch && isMin(sat, sources[0], sources[1]))
         {
             for (int i = 0; i < 2; i++)
             {
@@ -4569,7 +4562,6 @@ namespace IGC
                             {
                                 found = true;
                                 source = maxSources[1 - j];
-                                isUnsigned = false;
                                 break;
                             }
                         }

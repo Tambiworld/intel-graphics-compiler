@@ -78,6 +78,8 @@ namespace IGC
         /// @param  I The binary op
         void visitBinaryOperator(llvm::BinaryOperator& I);
 
+        void visitCallInst(llvm::CallInst& CI);
+
     private:
         /// @brief  Function entry point.
         ///         Finds all alloca instructions in this function, analyzes them and adds
@@ -88,9 +90,6 @@ namespace IGC
 
         /// @brief  A flag signaling if the current function uses private memory
         bool m_hasPrivateMem;
-
-        /// @brief  MetaData utils used to generate LLVM metadata
-        IGCMD::MetaDataUtils* m_pMDUtils;
     };
 
 } // namespace IGC

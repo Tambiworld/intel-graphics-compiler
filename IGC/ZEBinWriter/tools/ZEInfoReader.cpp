@@ -56,7 +56,7 @@ static void dumpZEInfo(std::unique_ptr<llvm::object::ObjectFile> object) {
             continue;
 
         llvm::StringRef content;
-        sect.getContents();
+        sect.getContents(content);
 
         std::ofstream outfile;
         outfile.open("ze_info.dump", std::ios::out | std::ios::binary);
@@ -73,26 +73,16 @@ static void dumpZEInfo(std::unique_ptr<llvm::object::ObjectFile> object) {
 
 /// ---------------- Command line options --------------------------------- ///
 static llvm::cl::opt<string> InputFilename(
-    llvm::cl::Positional, llvm::cl::desc("<input file>"));
+    llvm::cl::Positional, llvm::cl::desc("<input file>"), llvm::cl::Required);
 
 static llvm::cl::opt<bool> DumpZEInfo ("info",
     llvm::cl::desc("Dump .ze_info section into ze_info.dump file"));
-
-static llvm::cl::opt<bool> RunTestZEInfo ("test-ze-info",
-    llvm::cl::desc("Run static zeinfo generating tests, print the result to std output"));
 /// ----------------------------------------------------------------------- ///
 
 int zeinfo_reader_main(int argc, const char** argv) {
     llvm::cl::ParseCommandLineOptions(argc, argv);
 
-    // run zeinfo generating tests
-    // FIXME: This is just a static test, need to be enhanced
-    if (RunTestZEInfo) {
-        Tester::testZEInfoOutput();
-        return 0;
-    }
-
-    // read input elf file
+    // read input file
     llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileOrErr =
         llvm::MemoryBuffer::getFile(InputFilename);
 

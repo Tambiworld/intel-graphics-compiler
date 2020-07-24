@@ -623,7 +623,7 @@ void TimeStats::sumWith( const TimeStats* pOther )
 
     m_PassTotalTicks += pOther->m_PassTotalTicks;
 
-    if (IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsPerPass, TIME_STATS_PER_PASS))
+    if (IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_PASS))
     {
         if (m_PassTimeStatsMap.empty())
         {
@@ -681,17 +681,9 @@ void TimeStats::printTime( ShaderType type, ShaderHash hash, void* context ) con
 
 void TimeStats::printSumTime() const
 {
-    // If using regkey to turn on timestats, CorpusName is not initialized properly
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
-    {
-        std::stringstream corpusName;
-        corpusName << m_totalShaderCount << " shaders";
-        IGC::Debug::SetShaderCorpusName(corpusName.str().c_str());
-    }
-
     TimeStats pp = postProcess();
 
-    bool dumpCoarse = IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsCoarse, TIME_STATS_COARSE);
+    bool dumpCoarse = IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_COARSE );
 
     if ( dumpCoarse )
     {
@@ -702,7 +694,7 @@ void TimeStats::printSumTime() const
         pp.printSumTimeCSV("c:\\Intel\\TimeStatSum.csv");
     }
 
-    if (IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsPerPass, TIME_STATS_PER_PASS))
+    if (IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_PASS))
     {
         pp.printPerPassSumTime(llvm::dbgs());
         pp.printPerPassSumTimeCSV("c:\\Intel\\TimeStatPerPassSum.csv");
@@ -714,7 +706,7 @@ void TimeStats::printSumTime() const
 bool TimeStats::skipTimer( int i ) const
 {
     const COMPILE_TIME_INTERVALS interval = static_cast<COMPILE_TIME_INTERVALS>(i);
-    if( IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsCoarse, TIME_STATS_COARSE ) && !isCoarseTimer( interval ) )
+    if( IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_COARSE ) && !isCoarseTimer( interval ) )
     {
         return true;
     }
@@ -767,7 +759,7 @@ void TimeStats::printSumTimeCSV(const char* outputFile) const
         }
         fprintf(fileName, "\n");
 
-        if( !IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsCoarse, TIME_STATS_COARSE))
+        if( !IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_COARSE ) )
         {
             // print secs
             fprintf(fileName, "seconds,," );
@@ -942,7 +934,7 @@ void TimeStats::printSumTimeTable( llvm::raw_ostream & OS ) const
     FS << "\n";
 
     // table body
-    if (IGC_REGKEY_OR_FLAG_ENABLED(DumpTimeStatsCoarse, TIME_STATS_COARSE))
+    if (IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_COARSE))
     {
         uint64_t timeNotInCoarse = getCompileTime(TIME_TOTAL);
         for (int i = 0; i < MAX_COMPILE_TIME_INTERVALS; i++)
@@ -1057,12 +1049,7 @@ void TimeStats::printTimeCSV( std::string const& corpusName ) const
 {
     IGC_ASSERT_MESSAGE(m_isPostProcessed, "Print functions should only be called on a Post-Processed TimeStats object");
 
-    std::string subFile = "TimeStat_";
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
-        subFile += "Shaders";
-    else
-        subFile += IGC::Debug::GetShaderCorpusName();
-    const std::string outputFilePath = std::string("c:\\Intel\\") + subFile + ".csv";
+    const std::string outputFilePath = std::string("c:\\Intel\\") + "TimeStat_" + IGC::Debug::GetShaderCorpusName() + ".csv";
     const char *outputFile = outputFilePath.c_str();
 
     bool fileExist = false;
@@ -1116,12 +1103,7 @@ void TimeStats::printPerPassTimeCSV(std::string const& corpusName) const
         return;
     }
 
-    std::string subFile = "TimeStatPerPass_";
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
-        subFile += "Shaders";
-    else
-        subFile += IGC::Debug::GetShaderCorpusName();
-    const std::string outputFilePath = std::string("c:\\Intel\\") + subFile + ".csv";
+    const std::string outputFilePath = std::string("c:\\Intel\\") + "TimeStatPerPass_" + IGC::Debug::GetShaderCorpusName() + ".csv";
     const char* outputFile = outputFilePath.c_str();
     bool fileExist = false;
 

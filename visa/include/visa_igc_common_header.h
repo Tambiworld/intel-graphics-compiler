@@ -129,10 +129,7 @@ typedef enum {
     ALIGN_QWORD = 0x3,
     ALIGN_OWORD = 0x4,
     ALIGN_GRF = 0x5,
-    ALIGN_2_GRF = 0x6,
-    ALIGN_HWORD = 0x7,
-    ALIGN_32WORD = 0x8,
-    ALIGN_64WORD = 0x9,
+    ALIGN_2_GRF = 0x6, /* GRFx2 */
     ALIGN_BYTE = 0x0
 } VISA_Align;
 
@@ -393,7 +390,7 @@ typedef enum {
     ISA_ROL                = 0x80,
     ISA_ROR                = 0x81,
     ISA_DP4A               = 0x82,
-        ISA_NUM_OPCODE,
+    ISA_NUM_OPCODE,
     ISA_OPCODE_ENUM_SIZE   = 0xFF
 } ISA_Opcode;
 
@@ -624,7 +621,6 @@ typedef struct _vISA_RT_CONTROLS
     unsigned isCoarseMode:1; //controls coasrse mode bit inmsg descriptor
     unsigned isSampleIndex : 1; //controls whether sampleIndex is used.
     unsigned isHeaderMaskfromCe0 : 1;
-    unsigned isNullRT : 1;   // null render target
 } vISA_RT_CONTROLS;
 
 typedef enum
@@ -632,7 +628,6 @@ typedef enum
     LIFETIME_START = 0,
     LIFETIME_END = 1
 } VISAVarLifetime;
-
 
 
 // FixedFunctionID: these are hardware FFID values

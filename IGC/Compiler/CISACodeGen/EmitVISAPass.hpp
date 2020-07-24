@@ -117,7 +117,6 @@ public:
     void EmitSimpleAlu(EOPCODE opCode, const SSource source[2], const DstModifier& modifier);
     void EmitSimpleAlu(EOPCODE opCode, CVariable* dst, CVariable* src0, CVariable* src1);
     void EmitMinMax(bool isMin, bool isUnsigned, const SSource source[2], const DstModifier& modifier);
-    void EmitUAdd(llvm::BinaryOperator* inst, const DstModifier& modifier);
     void EmitFullMul32(bool isUnsigned, const SSource srcs[2], const DstModifier& dstMod);
     void EmitFPToIntWithSat(bool isUnsigned, bool needBitCast, VISA_Type type, const SSource& source, const DstModifier& modifier);
     void EmitNoModifier(llvm::Instruction* inst);
@@ -136,14 +135,14 @@ public:
     void emitMulAdd16(llvm::Instruction* I, const SSource source[2], const DstModifier& dstMod);
     void emitCall(llvm::CallInst* inst);
     void emitReturn(llvm::ReturnInst* inst);
+    void EmitCopyToStruct(llvm::InsertValueInst* inst, const DstModifier& DstMod);
+    void EmitCopyFromStruct(llvm::Value* value, unsigned idx, const DstModifier& DstMod);
 
     /// stack-call code-gen functions
     void emitStackCall(llvm::CallInst* inst);
     void emitStackFuncEntry(llvm::Function* F);
     void emitStackFuncExit(llvm::ReturnInst* inst);
     uint stackCallArgumentAlignment(CVariable* argv);
-    uint emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool isWrite);
-    void InitializeKernelStack(llvm::Function* pKernel);
 
     // emits the visa relocation instructions for function/global symbols
     void emitSymbolRelocation(llvm::Function& F);
@@ -420,7 +419,6 @@ public:
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0);
     void emitCopyAll(CVariable* Dst, CVariable* Src, llvm::Type* Ty);
 
-    void emitPushToStack(CVariable* pushOffset);
     void emitAddSP(CVariable* Dst, CVariable* Src, CVariable* offset);
     // emitAddPair - emulate 64bit addtition by 32-bit operations.
     // Dst and Src0 must be a 64-bit type variable.
@@ -474,27 +472,10 @@ public:
         return nullptr;
     }
 
-    bool IsGRFAligned(CVariable* pVar, e_alignment requiredAlign) const
-    {
-        e_alignment align = pVar->GetAlign();
-        if (requiredAlign == EALIGN_BYTE)
-        {
-            // trivial
-            return true;
-        }
-        if (requiredAlign == EALIGN_AUTO || align == EALIGN_AUTO)
-        {
-            // Can only assume that AUTO only matches AUTO (?)
-            // (keep the previous behavior unchanged.)
-            return align == requiredAlign;
-        }
-        return align >= requiredAlign;
-    }
-
-    CVariable* ExtendVariable(CVariable* pVar, e_alignment uniformAlign);
+    CVariable* ExtendVariable(CVariable* pVar, e_alignment uniformAlign = EALIGN_GRF);
     CVariable* BroadcastAndExtend(CVariable* pVar);
     CVariable* TruncatePointer(CVariable* pVar);
-    CVariable* ReAlignUniformVariable(CVariable* pVar, e_alignment align);
+    CVariable* ReAlignUniformVariable(CVariable* pVar, e_alignment align = EALIGN_GRF);
     CVariable* BroadcastAndTruncPointer(CVariable* pVar);
     CVariable* IndexableResourceIndex(CVariable* indexVar, uint btiIndex);
     ResourceDescriptor GetResourceVariable(llvm::Value* resourcePtr);
@@ -691,11 +672,6 @@ private:
     bool isHalfGRFReturn(CVariable* dst, SIMDMode simdMode);
 
     void emitFeedbackEnable();
-
-    // used for loading/storing uniform value using scatter/gather messages.
-    CVariable* prepareAddressForUniform(
-        CVariable* AddrVar, uint32_t EltBytes, uint32_t NElts, uint32_t ExecSz, e_alignment Align);
-    CVariable* prepareDataForUniform(CVariable* DataVar, uint32_t ExecSz, e_alignment Align);
 };
 
 } // namespace IGC

@@ -627,10 +627,5 @@
         return false;
     }
 
-    bool hasFP64Acc() const
-    {
-        return !noFP64();
-    }
-
 
     // end HW capabilities

@@ -121,7 +121,7 @@ void PeepholeTypeLegalizer::visitInstruction(Instruction& I) {
         if (dyn_cast<PHINode>(&I)) {
             legalizePhiInstruction(I);  // phi nodes and all incoming values
         }
-        else if (dyn_cast<UnaryInstruction>(&I)) {
+        if (dyn_cast<UnaryInstruction>(&I)) {
             legalizeUnaryInstruction(I); // pointercast &/or load
         }
         else if (dyn_cast<ICmpInst>(&I) || dyn_cast<BinaryOperator>(&I) || dyn_cast<SelectInst>(&I)) {
@@ -868,6 +868,7 @@ void PeepholeTypeLegalizer::cleanupZExtInst(Instruction& I) {
     }
     break;
     default:
+        printf("Unhandled source to ZExt Instruction seen with illegal int type. Legalization support missing. Source Inst opcode:%d", prevInst->getOpcode());
         IGC_ASSERT_MESSAGE(0, "Unhandled source to ZExt Instruction seen with illegal int type. Legalization support missing.");
         break;
     }
@@ -945,6 +946,7 @@ void PeepholeTypeLegalizer::cleanupBitCastInst(Instruction& I) {
         break;
     }
     default:
+        IGC_ASSERT_MESSAGE(0, "Unhandled source to BitCast Instruction seen with illegal int type. Legalization support missing.");
         break;
     }
 }

@@ -57,7 +57,6 @@ const StringRef ExtensionFuncsAnalysis::VME_HELPER_GET_AS = "__builtin_IB_vme_he
 bool ExtensionFuncsAnalysis::runOnModule(Module& M)
 {
     bool changed = false;
-    m_pMDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     // Run on all functions defined in this module
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
     {
@@ -68,10 +67,6 @@ bool ExtensionFuncsAnalysis::runOnModule(Module& M)
             changed = true;
         }
     }
-
-    // Update LLVM metadata based on IGC MetadataUtils
-    if (changed)
-        m_pMDUtils->save(M.getContext());
 
     return changed;
 }
@@ -96,7 +91,7 @@ bool ExtensionFuncsAnalysis::runOnFunction(Function& F)
     implicitArgs.push_back(ImplicitArg::VME_SEARCH_PATH_TYPE);
 
     // Create the metadata representing the VME implicit args needed by this function
-    ImplicitArgs::addImplicitArgs(F, implicitArgs, m_pMDUtils);
+    ImplicitArgs::addImplicitArgs(F, implicitArgs, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
 
     return true;
 }

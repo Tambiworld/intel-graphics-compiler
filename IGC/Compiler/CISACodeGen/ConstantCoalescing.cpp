@@ -375,6 +375,7 @@ bool ConstantCoalescing::safeToMoveInstUp(Instruction* inst, Instruction* newLoc
     return true;
 }
 
+
 //32 dwords, meaning 8 owords; This would allow us to use 4 GRFs.
 //Hardware limit is 8 GRFs but could build pressure on RA. Hence keeping it to 4 for now.
 #define MAX_OWLOAD_SIZE (32 * 4)
@@ -383,30 +384,7 @@ bool ConstantCoalescing::safeToMoveInstUp(Instruction* inst, Instruction* newLoc
 // of the extract mask (see emitVectorBitcast).
 #define MAX_VECTOR_NUM_ELEMENTS 32
 
-bool ConstantCoalescing::isProfitableLoad(
-    const Instruction* I, uint32_t &MaxEltPlus) const
-{
-    auto* LoadTy = I->getType();
-    MaxEltPlus = 1;
-    if (LoadTy->isVectorTy())
-    {
-        // \todo, another parameter to tune
-        uint32_t MaxVectorInput =
-            (isa<LoadInst>(I) && wiAns->whichDepend(I) == WIAnalysis::UNIFORM) ?
-            16 : 4;
-
-        if (LoadTy->getVectorNumElements() > MaxVectorInput)
-            return false;
-
-        MaxEltPlus = CheckVectorElementUses(I);
-        // maxEltPlus == 0, means that vector may be used with index or as-vector,
-        // skip it for now
-        if (MaxEltPlus == 0)
-            return false;
-    }
-
-    return true;
-}
+#define MAX_VECTOR_INPUT 4  // 4 element
 
 void ConstantCoalescing::ProcessBlock(
     BasicBlock * blk,
@@ -416,14 +394,16 @@ void ConstantCoalescing::ProcessBlock(
 {
     // get work-item analysis, need to update uniformness information
     for (BasicBlock::iterator BBI = blk->begin(), BBE = blk->end();
-         BBI != BBE; ++BBI)
+        BBI != BBE; ++BBI)
     {
+
         // skip dead instructions
         if (BBI->use_empty())
+        {
             continue;
-
+        }
         // bindless case
-        if (auto* ldRaw = dyn_cast<LdRawIntrinsic>(BBI))
+        if (LdRawIntrinsic * ldRaw = dyn_cast<LdRawIntrinsic>(BBI))
         {
             bool directIdx = false;
             unsigned int bufId = 0;
@@ -433,7 +413,8 @@ void ConstantCoalescing::ProcessBlock(
             {
                 continue;
             }
-            if (auto* offsetValue = dyn_cast<ConstantInt>(ldRaw->getOffsetValue()))
+            ConstantInt* offsetValue = dyn_cast<ConstantInt>(ldRaw->getOffsetValue());
+            if (offsetValue)
             {   // direct access
                 uint offsetInBytes = (uint)offsetValue->getZExtValue();
                 if ((int32_t)offsetInBytes >= 0)
@@ -441,22 +422,30 @@ void ConstantCoalescing::ProcessBlock(
                     if (wiAns->whichDepend(ldRaw) == WIAnalysis::UNIFORM)
                     {
                         uint maxEltPlus = 1;
-                        if (!isProfitableLoad(ldRaw, maxEltPlus))
-                            continue;
+                        if (ldRaw->getType()->isVectorTy())
+                        {
+                            // \todo, another parameter to tune
+                            if (ldRaw->getType()->getVectorNumElements() > MAX_VECTOR_INPUT)
+                                continue;
+                            maxEltPlus = CheckVectorElementUses(ldRaw);
+                            // maxEltPlus == 0, means that vector may be used with index or as-vector,
+                            // skip it for now
+                            if (maxEltPlus == 0)
+                                continue;
+                        }
                         MergeUniformLoad(ldRaw, ldRaw->getResourceValue(), 0, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
                     }
                 }
             }
             continue;
         }
-
-        auto* LI = dyn_cast<LoadInst>(BBI);
+        LoadInst* inst = dyn_cast<LoadInst>(BBI);
         // skip load on struct or array type
-        if (!LI || LI->getType()->isAggregateType())
+        if (!inst || inst->getType()->isAggregateType())
         {
             continue;
         }
-        Type* loadType = LI->getType();
+        Type* loadType = inst->getType();
         Type* elemType = loadType->getScalarType();
         // right now, only work on load with dword element-type
         if (elemType->getPrimitiveSizeInBits() != SIZE_DWORD * 8)
@@ -465,53 +454,72 @@ void ConstantCoalescing::ProcessBlock(
         }
 
         // stateless path: use int2ptr, and support vector-loads
-        if (LI->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT)
+        Value* elt_idxv = nullptr;
+        Value* buf_idxv = nullptr;
+        if (inst->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT)
         {
             // another limit: load has to be dword-aligned
-            if (LI->getAlignment() % 4)
+            if (inst->getAlignment() % 4)
                 continue;
             uint maxEltPlus = 1;
-            if (!isProfitableLoad(LI, maxEltPlus))
-                continue;
-
-            Value* buf_idxv = nullptr;
-            Value* elt_idxv = nullptr;
+            if (loadType->isVectorTy())
+            {
+                // \todo, another parameter to tune
+                if (loadType->getVectorNumElements() > MAX_VECTOR_INPUT)
+                    continue;
+                maxEltPlus = CheckVectorElementUses(inst);
+                // maxEltPlus == 0, means that vector may be used with index or as-vector,
+                // skip it for now
+                if (maxEltPlus == 0)
+                    continue;
+            }
             uint offsetInBytes = 0;
-            if (DecomposePtrExp(LI->getPointerOperand(), buf_idxv, elt_idxv, offsetInBytes))
+            if (DecomposePtrExp(inst->getPointerOperand(), buf_idxv, elt_idxv, offsetInBytes))
             {
                 // TODO: Disabling constant coalescing when we see that the offset to the constant buffer is negtive
                 // As we handle all negative offsets as uint and some arithmetic operations do not work well. Needs more detailed fix
                 if ((int32_t)offsetInBytes >= 0)
                 {
-                    if (wiAns->whichDepend(LI) == WIAnalysis::UNIFORM)
+                    if (wiAns->whichDepend(inst) == WIAnalysis::UNIFORM)
                     {   // uniform
                         if (elt_idxv)
-                            MergeUniformLoad(LI, buf_idxv, 0, elt_idxv, offsetInBytes, maxEltPlus, indcb_owloads);
+                            MergeUniformLoad(inst, buf_idxv, 0, elt_idxv, offsetInBytes, maxEltPlus, indcb_owloads);
                         else
-                            MergeUniformLoad(LI, buf_idxv, 0, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
+                            MergeUniformLoad(inst, buf_idxv, 0, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
                     }
                     else
                     {   // not uniform
-                        MergeScatterLoad(LI, buf_idxv, 0, elt_idxv, offsetInBytes, maxEltPlus, indcb_gathers);
+                        MergeScatterLoad(inst, buf_idxv, 0, elt_idxv, offsetInBytes, maxEltPlus, indcb_gathers);
                     }
                 }
             }
             continue;
         }
 
+
         uint bufId = 0;
         Value* elt_ptrv = nullptr;
         // \todo, handle dynamic buffer-indexing if necessary
         BufferType bufType = BUFFER_TYPE_UNKNOWN;
-        if (IsReadOnlyLoadDirectCB(LI, bufId, elt_ptrv, bufType))
+        bool is_cbload = IsReadOnlyLoadDirectCB(inst, bufId, elt_ptrv, bufType);
+        if (is_cbload)
         {
-            uint addrSpace = LI->getPointerAddressSpace();
+            uint addrSpace = inst->getPointerAddressSpace();
             uint maxEltPlus = 1;
-            if (!isProfitableLoad(LI, maxEltPlus))
-                continue;
+            if (loadType->isVectorTy())
+            {
+                // \todo, another parameter to tune
+                if (loadType->getVectorNumElements() > MAX_VECTOR_INPUT)
+                    continue;
+                maxEltPlus = CheckVectorElementUses(inst);
+                // maxEltPlus == 0, means that vector may be used with index or as-vector,
+                // skip it for now
+                if (maxEltPlus == 0)
+                    continue;
+            }
             if (isa<ConstantPointerNull>(elt_ptrv))
             {
-                MergeUniformLoad(LI, nullptr, addrSpace, nullptr, 0, maxEltPlus, dircb_owloads);
+                MergeUniformLoad(inst, nullptr, addrSpace, nullptr, 0, maxEltPlus, dircb_owloads);
             }
             else if (isa<IntToPtrInst>(elt_ptrv))
             {
@@ -524,7 +532,7 @@ void ConstantCoalescing::ProcessBlock(
                     // As we handle all negative offsets as uint and some arithmetic operations do not work well. Needs more detailed fix
                     if ((int32_t)offsetInBytes >= 0)
                     {
-                        MergeUniformLoad(LI, nullptr, addrSpace, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
+                        MergeUniformLoad(inst, nullptr, addrSpace, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
                     }
                 }
                 else
@@ -535,19 +543,19 @@ void ConstantCoalescing::ProcessBlock(
                     // As we handle all negative offsets as uint and some arithmetic operations do not work well. Needs more detailed fix
                     if ((int32_t)offsetInBytes >= 0)
                     {
-                        if (wiAns->whichDepend(LI) == WIAnalysis::UNIFORM)
+                        if (wiAns->whichDepend(inst) == WIAnalysis::UNIFORM)
                         {   // uniform
-                            MergeUniformLoad(LI, nullptr, addrSpace, elt_idxv, offsetInBytes, maxEltPlus, indcb_owloads);
+                            MergeUniformLoad(inst, nullptr, addrSpace, elt_idxv, offsetInBytes, maxEltPlus, indcb_owloads);
                         }
                         else
                         {   // not uniform
 #ifdef SUPPORT_GATHER4
-                            MergeScatterLoad(LI, nullptr, bufid, elt_idxv, eltid, 1, indcb_gathers);
+                            MergeScatterLoad(inst, nullptr, bufid, elt_idxv, eltid, 1, indcb_gathers);
 #else
                             if (UsesTypedConstantBuffer(m_ctx) &&
                                 bufType == CONSTANT_BUFFER)
                             {
-                                ScatterToSampler(LI, nullptr, addrSpace, elt_idxv, offsetInBytes, indcb_gathers);
+                                ScatterToSampler(inst, nullptr, addrSpace, elt_idxv, offsetInBytes, indcb_gathers);
                             }
 #endif
                         }
@@ -672,7 +680,8 @@ void ConstantCoalescing::FindAllDirectCB(
         uint chunkSize = (*iter)->chunkStart + scalarSizeInBytes - firstBufInChunk->chunkStart;
         static_assert(MAX_VECTOR_NUM_ELEMENTS >= SIZE_OWORD, "Code below may need an update");
         if (firstBufInChunk->addrSpace == (*iter)->addrSpace &&
-            profitableChunkSize(chunkSize, scalarSizeInBytes) &&
+            (chunkSize * scalarSizeInBytes) <= MAX_OWLOAD_SIZE &&
+            chunkSize <= MAX_VECTOR_NUM_ELEMENTS &&
             ((scalarSizeInBytes * eltid) % 4) == 0)
         {
             if ((*iter)->loadOrder < firstCBLoadEle)
@@ -703,23 +712,8 @@ void ConstantCoalescing::FindAllDirectCB(
     }
 }
 
-bool ConstantCoalescing::profitableChunkSize(
-    uint32_t ub, uint32_t lb, uint32_t eltSizeInBytes)
-{
-    IGC_ASSERT(ub >= lb);
-    return profitableChunkSize(ub - lb, eltSizeInBytes);
-}
-
-bool ConstantCoalescing::profitableChunkSize(
-    uint32_t chunkSize, uint32_t eltSizeInBytes)
-{
-    return chunkSize * eltSizeInBytes <= MAX_OWLOAD_SIZE &&
-           chunkSize <= MAX_VECTOR_NUM_ELEMENTS;
-}
-
 /// check if two access have the same buffer-base
-bool ConstantCoalescing::CompareBufferBase(
-    const Value* bufIdxV1, uint addrSpace1, const Value* bufIdxV2, uint addrSpace2)
+bool ConstantCoalescing::CompareBufferBase(Value* bufIdxV1, uint addrSpace1, Value* bufIdxV2, uint addrSpace2)
 {
     if (bufIdxV1 == bufIdxV2)
     {
@@ -1046,15 +1040,13 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
     uint maxEltPlus,
     std::vector<BufChunk*>& chunk_vec)
 {
+    const uint scalarSizeInBytes = load->getType()->getScalarSizeInBits() / 8;
     const uint alignment = GetAlignment(load);
 
     if (alignment == 0)
     {
         return;
     }
-
-    const Type* LoadEltTy = load->getType()->getScalarType();
-    const uint scalarSizeInBytes = LoadEltTy->getPrimitiveSizeInBits() / 8;
 
     IGC_ASSERT(isPowerOf2_32(alignment));
     IGC_ASSERT(0 != scalarSizeInBytes);
@@ -1065,34 +1057,35 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
     // Current assumption is that a chunk start needs to be DWORD aligned. In
     // the future we can consider adding support for merging 4 bytes or
     // 2 i16s/halfs into a single non-aligned DWORD.
-    const bool isDwordAligned =
-        ((offsetInBytes % 4) == 0 && (eltIdxV == nullptr || alignment >= 4));
+    const bool isDwordAligned = ((offsetInBytes % 4) == 0 && (eltIdxV == nullptr || alignment >= 4));
 
-    auto shouldMerge = [&](const BufChunk* cur_chunk)
+    bool isStatelessLoad = false;
+
+    if (isa<LoadInst>(load))
     {
+        if (cast<LoadInst>(load)->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT)
+            isStatelessLoad = true;
+    }
+
+    BufChunk* cov_chunk = nullptr;
+    for (std::vector<BufChunk*>::iterator rit = chunk_vec.begin(); rit != chunk_vec.end(); rit++)
+    {
+        BufChunk* cur_chunk = *rit;
         if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace) &&
             cur_chunk->baseIdxV == eltIdxV &&
-            cur_chunk->chunkIO->getType()->getScalarType() == LoadEltTy)
+            cur_chunk->chunkIO->getType()->getScalarType() == load->getType()->getScalarType())
         {
             uint lb = std::min(eltid, cur_chunk->chunkStart);
             uint ub = std::max(eltid + maxEltPlus, cur_chunk->chunkStart + cur_chunk->chunkSize);
-            if (profitableChunkSize(ub, lb, scalarSizeInBytes) &&
+            if (((ub - lb) * scalarSizeInBytes) <= MAX_OWLOAD_SIZE &&
+                (ub - lb) <= MAX_VECTOR_NUM_ELEMENTS &&
                 (isDwordAligned || eltid >= cur_chunk->chunkStart))
             {
-                return true;
+                cov_chunk = cur_chunk;
+                break;
             }
         }
-
-        return false;
-    };
-
-    BufChunk* cov_chunk = nullptr;
-    if (auto I = std::find_if(chunk_vec.begin(), chunk_vec.end(), shouldMerge);
-        I != chunk_vec.end())
-    {
-        cov_chunk = *I;
     }
-
     if (!cov_chunk)
     {
         if (isDwordAligned)
@@ -1111,10 +1104,6 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
     }
     else if (load->getType()->isVectorTy())
     {
-        bool isStatelessLoad = false;
-        if (auto * LI = dyn_cast<LoadInst>(load))
-            isStatelessLoad = (LI->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT);
-
         // just to modify all the extract, and connect it to the chunk-load
         uint lb = std::min(eltid, cov_chunk->chunkStart);
         uint ub = std::max(eltid + maxEltPlus, cov_chunk->chunkStart + cov_chunk->chunkSize);
@@ -1325,51 +1314,16 @@ Value* ConstantCoalescing::SimpleBaseOffset(Value* elt_idxv, uint& offset)
     return elt_idxv;
 }
 
-// This is taken from GetPointerBaseWithConstantOffset() but:
-// 1) We don't walk to look through addrspacecast
-// 2) Don't look at globals
-static Value *getPointerBaseWithConstantOffset(Value *Ptr, int64_t &Offset,
-                                              const DataLayout &DL) {
-  unsigned BitWidth = DL.getIndexTypeSizeInBits(Ptr->getType());
-  APInt ByteOffset(BitWidth, 0);
-
-  // We walk up the defs but use a visited set to handle unreachable code. In
-  // that case, we stop after accumulating the cycle once (not that it
-  // matters).
-  SmallPtrSet<Value *, 16> Visited;
-  while (Visited.insert(Ptr).second) {
-    if (Ptr->getType()->isVectorTy())
-      break;
-
-    if (GEPOperator *GEP = dyn_cast<GEPOperator>(Ptr)) {
-      APInt GEPOffset(DL.getIndexTypeSizeInBits(Ptr->getType()), 0);
-      if (!GEP->accumulateConstantOffset(DL, GEPOffset))
-        break;
-
-      ByteOffset += GEPOffset.getSExtValue();
-
-      Ptr = GEP->getPointerOperand();
-    } else if (Operator::getOpcode(Ptr) == Instruction::BitCast) {
-      Ptr = cast<Operator>(Ptr)->getOperand(0);
-    } else {
-      break;
-    }
-  }
-  Offset = ByteOffset.getSExtValue();
-  return Ptr;
-}
-
-bool ConstantCoalescing::DecomposePtrExp(
-    Value* ptr_val, Value*& buf_idxv, Value*& elt_idxv, uint& offset)
+bool ConstantCoalescing::DecomposePtrExp(Value* ptr_val, Value*& buf_idxv, Value*& elt_idxv, uint& offset)
 {
     buf_idxv = ptr_val;
     elt_idxv = nullptr;
     offset = 0;
 
-    if (auto* i2p = dyn_cast<IntToPtrInst>(ptr_val))
+    if (IntToPtrInst * i2p = dyn_cast<IntToPtrInst>(ptr_val))
     {
         // get the int-type address computation
-        auto* expr = dyn_cast<Instruction>(i2p->getOperand(0));
+        Instruction* expr = dyn_cast<Instruction>(i2p->getOperand(0));
         if (!expr || !expr->getType()->isIntegerTy())
         {
             return false;
@@ -1377,8 +1331,6 @@ bool ConstantCoalescing::DecomposePtrExp(
         // look for the buf_idxv from a ptr2int
         if (isa<PtrToIntInst>(expr))
         {
-            // %expr = ptrtoint %x
-            // %ptr_val = inttoptr %expr
             buf_idxv = expr;
             elt_idxv = nullptr;
             offset = 0;
@@ -1386,15 +1338,13 @@ bool ConstantCoalescing::DecomposePtrExp(
         }
         if (expr->getOpcode() == Instruction::Add)
         {
-            // %expr    = add %src0 %src1
-            // %ptr_val = inttoptr %expr
             Value* src0 = expr->getOperand(0);
             Value* src1 = expr->getOperand(1);
             if (isa<PtrToIntInst>(src0))
             {
-                // %src0 = ptrtoint %x
                 buf_idxv = src0;
-                if (auto* elt_idx = dyn_cast<ConstantInt>(src1))
+                ConstantInt* elt_idx = dyn_cast<ConstantInt>(src1);
+                if (elt_idx)
                 {   // direct access
                     offset = (uint)elt_idx->getZExtValue();
                     elt_idxv = nullptr;
@@ -1408,7 +1358,8 @@ bool ConstantCoalescing::DecomposePtrExp(
             else if (isa<PtrToIntInst>(src1))
             {
                 buf_idxv = src1;
-                if (auto* elt_idx = dyn_cast<ConstantInt>(src0))
+                ConstantInt* elt_idx = dyn_cast<ConstantInt>(src0);
+                if (elt_idx)
                 {   // direct access
                     offset = (uint)elt_idx->getZExtValue();
                     elt_idxv = nullptr;
@@ -1419,14 +1370,14 @@ bool ConstantCoalescing::DecomposePtrExp(
                 }
                 return true;
             }
-            else if (auto* elt_idx = dyn_cast<ConstantInt>(src1))
+            else if (ConstantInt * elt_idx = dyn_cast<ConstantInt>(src1))
             {
                 offset = (uint)elt_idx->getZExtValue();
                 elt_idxv = nullptr;
                 buf_idxv = src0;
                 return true;
             }
-            else if (auto* elt_idx = dyn_cast<ConstantInt>(src0))
+            else if (ConstantInt * elt_idx = dyn_cast<ConstantInt>(src0))
             {
                 offset = (uint)elt_idx->getZExtValue();
                 elt_idxv = nullptr;
@@ -1436,35 +1387,22 @@ bool ConstantCoalescing::DecomposePtrExp(
         }
         buf_idxv = expr;
     }
-    else
-    {
-        int64_t Offset = 0;
-        auto *Ptr = getPointerBaseWithConstantOffset(ptr_val, Offset, *dataLayout);
-
-        if (Ptr == ptr_val || Offset < 0)
-            return false;
-
-        buf_idxv = Ptr;
-        elt_idxv = nullptr;
-        offset = (uint)Offset;
-    }
-
     return true;
 }
 
-/// look at all the uses of a vector load. If they are all extract-elements
-/// with constant indices, return the max-elt-index + 1.
-uint ConstantCoalescing::CheckVectorElementUses(const Instruction* load)
+/// look at all the uses of a vector load. If they are all extract-elements,
+uint ConstantCoalescing::CheckVectorElementUses(Instruction* load)
 {
     uint maxEltPlus = 0;
-    for (auto *U : load->users())
+    for (auto I = load->user_begin(), E = load->user_end(); (I != E); ++I)
     {
-        if (auto* extract = dyn_cast<ExtractElementInst>(U))
+        if (llvm::ExtractElementInst * extract = llvm::dyn_cast<llvm::ExtractElementInst>(*I))
         {
-            if (auto* index = dyn_cast<ConstantInt>(extract->getIndexOperand()))
+            if (llvm::ConstantInt * index = llvm::dyn_cast<ConstantInt>(extract->getIndexOperand()))
             {
                 uint cv = static_cast<uint>(index->getZExtValue());
-                maxEltPlus = std::max(maxEltPlus, cv + 1);
+                if (cv + 1 > maxEltPlus)
+                    maxEltPlus = cv + 1;
             }
             else
             {

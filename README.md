@@ -32,7 +32,6 @@ IGC is supported on the following 64 bit Linux operating systems:
 
 * Ubuntu 18.04
 * Ubuntu 19.04
-* Ubuntu 20.04
 
 ## Building
 
