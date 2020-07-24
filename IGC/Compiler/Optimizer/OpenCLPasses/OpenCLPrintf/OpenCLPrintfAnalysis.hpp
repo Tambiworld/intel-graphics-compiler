@@ -75,7 +75,10 @@ namespace IGC
         ///         size of the buffer.
         void addPrintfBufferArgs(llvm::Function& F);
 
-        bool m_hasPrintf;
+        std::unordered_set < llvm::Function*> m_hasPrintfs;
+
+        /// @brief  MetaData utils used to generate LLVM metadata
+        IGCMD::MetaDataUtils* m_pMDUtils;
     };
 
 } // namespace IGC

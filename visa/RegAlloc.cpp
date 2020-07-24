@@ -205,6 +205,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                                 if (ptr->asRegVar()->getId() != srcPtr->asRegVar()->getId())
                                 {
                                     mergePointsToSet(srcPtr->asRegVar(), ptr->asRegVar());
+                                    fg.getKernel()->setHasUndefinedPointAddrTaken(true);
                                 }
                             }
                             else
@@ -221,11 +222,12 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                                     // conservatively assume address can point to anything
                                     DEBUG_MSG("unexpected addr move for pointer analysis:\n");
                                     DEBUG_EMIT(inst);
-                                    DEBUG_MSG("\n")
-                                        for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
-                                        {
-                                            addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
-                                        }
+                                    DEBUG_MSG("\n");
+                                    for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
+                                    {
+                                        addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
+                                    }
+                                    fg.getKernel()->setHasUndefinedPointAddrTaken(true);
                                 }
                             }
                         }
@@ -278,6 +280,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                                 if (srcPtr && (ptr->asRegVar()->getId() != srcPtr->asRegVar()->getId()))
                                 {
                                     mergePointsToSet(srcPtr->asRegVar(), ptr->asRegVar());
+                                    fg.getKernel()->setHasUndefinedPointAddrTaken(true);
                                 }
                             }
                         }
@@ -290,11 +293,12 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                             // case 6:  add/mul A0 V1 V2
                             DEBUG_MSG("unexpected addr add/mul for pointer analysis:\n");
                             DEBUG_EMIT(inst);
-                            DEBUG_MSG("\n")
-                                for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
-                                {
-                                    addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
-                                }
+                            DEBUG_MSG("\n");
+                            for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
+                            {
+                                addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
+                            }
+                            fg.getKernel()->setHasUndefinedPointAddrTaken(true);
                         }
                     }
                     else
@@ -307,6 +311,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                         {
                             addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
                         }
+                        fg.getKernel()->setHasUndefinedPointAddrTaken(true);
                     }
                 }
                 else if (ptr->isRegVar() && !ptr->asRegVar()->getDeclare()->isMsgDesc())
@@ -602,9 +607,9 @@ bool LivenessAnalysis::livenessCandidate(G4_Declare* decl, bool verifyRA)
     }
     else if ((selectedRF & decl->getRegFile()))
     {
-        if ((selectedRF & G4_GRF) && (decl->getRegFile() & G4_INPUT))
+        if (selectedRF & G4_GRF)
         {
-            if (decl->getRegVar()->isPhyRegAssigned() && !decl->getRegVar()->isGreg())
+            if ((decl->getRegFile() & G4_INPUT) && decl->getRegVar()->isPhyRegAssigned() && !decl->getRegVar()->isGreg())
             {
                 return false;
             }
@@ -2442,7 +2447,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
             --iterToInsert;
         } while ((*iterToInsert)->isPseudoKill());
         G4_INST* killInst = fg.builder->createPseudoKill(pseudoKill.first, PseudoKillType::FromLiveness);
-        bb->insert(iterToInsert, killInst);
+        bb->insertBefore(iterToInsert, killInst);
     }
 
     //

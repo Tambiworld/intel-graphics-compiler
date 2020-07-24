@@ -299,19 +299,12 @@ void SpillManager::replaceSpilledDst(G4_BB* bb,
             }
 
             G4_DstRegRegion rgn(*dst, tmpDcl->getRegVar()); // using tmpDcl as new base
-            G4_DstRegRegion* d = builder.createDstRegRegion(rgn);
-
-            //src has optimization to bring back only what is used.
-            //so it will always start from 0
-            if( match_found )
-            {
-                d->setSubRegOff(0);
-            }
+            G4_DstRegRegion* d = match_found ? builder.createDstWithNewSubRegOff(&rgn, 0) : builder.createDstRegRegion(rgn);
             inst->setDest(d);
 
-            if( !match_found )
+            if (!match_found)
             {
-                pointsToAnalysis.insertAndMergeFilledAddr( dst->getBase()->asRegVar(), tmpDcl->getRegVar() );
+                pointsToAnalysis.insertAndMergeFilledAddr(dst->getBase()->asRegVar(), tmpDcl->getRegVar());
             }
         }
         else
@@ -357,7 +350,7 @@ void SpillManager::replaceSpilledSrc(G4_BB* bb,
                 auto movSrc = builder.Create_Src_Opnd_From_Dcl(spDcl, builder.getRegionScalar());
                 auto movDst = builder.Create_Dst_Opnd_From_Dcl(tmpDcl, 1);
                 G4_INST* movInst = builder.createMov(1, movDst, movSrc, InstOpt_WriteEnable, false);
-                bb->insert(it, movInst);
+                bb->insertBefore(it, movInst);
 
                 s = builder.createSrcRegRegion(
                     Mod_src_undef,

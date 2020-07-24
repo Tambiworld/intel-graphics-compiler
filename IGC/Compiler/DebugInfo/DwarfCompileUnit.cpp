@@ -66,8 +66,8 @@ using namespace ::IGC;
 
 /// CompileUnit - Compile unit constructor.
 CompileUnit::CompileUnit(unsigned UID, DIE* D, DICompileUnit* Node,
-    StreamEmitter* A, VISAModule* M, IGC::DwarfDebug* DW)
-    : UniqueID(UID), Node(Node), CUDie(D), Asm(A), m_pModule(M), DD(DW),
+    StreamEmitter* A, IGC::DwarfDebug* DW)
+    : UniqueID(UID), Node(Node), CUDie(D), Asm(A), DD(DW),
     IndexTyDie(0), DebugInfoOffset(0)
 {
     DIEIntegerOne = new (DIEValueAllocator)DIEInteger(1);
@@ -221,7 +221,7 @@ void CompileUnit::addSInt(DIEBlock* Die, Optional<dwarf::Form> Form, int64_t Int
 /// table.
 void CompileUnit::addString(DIE* Die, dwarf::Attribute Attribute, StringRef String)
 {
-    if (m_pModule->isDirectElfInput)
+    if (DD->IsDirectElfInput())
     {
         // Emit string inlined
         auto Str = new (DIEValueAllocator) DIEInlinedString(String);
@@ -401,6 +401,14 @@ void CompileUnit::addSourceLine(DIE * Die, DINamespace * NS)
     addSourceLine(Die, NS, NS->getLine());
 }
 #endif
+
+void CompileUnit::addRegisterLoc(DIEBlock* TheDie, unsigned DWReg, int64_t Offset, const llvm::Instruction* dbgInst)
+{
+    if (isa<llvm::DbgDeclareInst>(dbgInst))
+        addRegisterOffset(TheDie, DWReg, Offset);
+    else
+        addRegisterOp(TheDie, DWReg);
+}
 
 /// addRegisterOp - Add register operand.
 void CompileUnit::addRegisterOp(DIEBlock* TheDie, unsigned DWReg)
@@ -756,9 +764,9 @@ void CompileUnit::addGTRelativeLocation(DIEBlock* Block, VISAVariableLocation* L
 
             IGC_ASSERT_MESSAGE(false == Loc->IsInGlobalAddrSpace(), "Missing surface for variable location");
 
-            uint64_t btiBaseAddr = 0;                   // TBD MT
+            uint64_t btiBaseAddr = 0;                   // TBD MT use virtual debug register
             uint64_t bti = Loc->GetSurface();           // BTI
-            uint64_t surfaceStateBaseAddr = 0;          // TBD MT
+            uint64_t surfaceStateBaseAddr = 0;          // TBD MT use virtual debug register
             uint32_t surfaceOffset = Loc->GetOffset();  // Surface offset
 
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bregx);
@@ -890,19 +898,31 @@ void CompileUnit::addBindlessSamplerLocation(DIEBlock* Block, VISAVariableLocati
 
 // addScratchLocation - add a sequence of attributes to emit scratch space location
 // of variable
-void CompileUnit::addScratchLocation(DIEBlock* Block, DbgDecoder::VarInfo* varInfo)
+void CompileUnit::addScratchLocation(DIEBlock* Block, DbgDecoder::VarInfo* varInfo, int32_t vectorOffset)
 {
+    uint32_t offset = varInfo->lrs.front().getSpillOffset().memoryOffset + vectorOffset;
+
+    IGC_ASSERT_MESSAGE(IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging), "SIMD lane expressions support only");
+
     if (IGC_IS_FLAG_ENABLED(EnableGTLocationDebugging))
     {
         // For spills to the scratch area at offset available as literal
         // 1 DW_OP_bregx <scrbase>, <offset>
         uint32_t scratchBaseAddr = 0; // TBD MT use virtual debug register with Scratch Base Address
 
-        uint32_t offset = varInfo->getSpillOffset().memoryOffset;
-
         addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bregx);
         addUInt(Block, dwarf::DW_FORM_udata, scratchBaseAddr);  // Base address of surface or sampler
         addSInt(Block, dwarf::DW_FORM_sdata, offset);           // Offset to base address
+        // DW_OP_deref moved to the end of SIMD lane snippet
+    }
+    else
+    {
+        Address addr;
+        addr.Set(Address::Space::eScratch, 0, offset);
+
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
+        addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
+        // DW_OP_deref moved to the end of SIMD lane snippet
     }
 }
 
@@ -922,27 +942,44 @@ void CompileUnit::addSLMLocation(DIEBlock* Block, VISAVariableLocation* Loc)
 
 // addSimdLane - add a sequence of attributes to calculate location of vectorized variable
 // among SIMD lanes, e.g. a GRF subregister.
+//
+// Example of expression generated for 32-bit variables located in GRF:
+// (note: DW_OP_regx N is generated earlier, i.e. prior to addSimdLane())
+// DW_OP_INTEL_push_simd_lane
+// DW_OP_lit5
+// DW_OP_shl
+// DW_OP_const1u 32
+// DW_OP_INTEL_bit_piece_stack
+//
+// Example of expression generated for 64-bit variable, which is located in memory:
+// (note: DW_OP_bregx N is generated earlier)
+// DW_OP_INTEL_push_simd_lane
+// DW_OP_lit6
+// DW_OP_shl
+// DW_OP_plus
+// (note: no deref is emitted for bregx)
+
+// Example of expression generated for (64-bit) ptr to a variable, which is located in scratch:
+// (note: DW_OP_const8u address is generated earlier)
+// DW_OP_INTEL_push_simd_lane
+// DW_OP_lit6
+// DW_OP_shl
+// DW_OP_plus
+// DW_OP_deref
 void CompileUnit::addSimdLane(DIEBlock* Block, DbgVariable& DV, VISAVariableLocation *Loc, bool isPacked)
 {
     if (IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging) && Loc->IsVectorized())
     {
         // SIMD lane
-        uint64_t varSizeInBits = DV.getBasicSize(DD);
-        // uint64_t varOffsetInBits = DV.getType()->getOffsetInBits(); // TBD MT
+        uint64_t varSizeInBits = Loc->IsInMemory() ? (uint64_t)Asm->GetPointerSize() * 8 : DV.getBasicSize(DD);
 
         IGC_ASSERT_MESSAGE(varSizeInBits % 8 == 0, "Variable's size not aligned to byte");
 
         addUInt(Block, dwarf::DW_FORM_data1, DW_OP_INTEL_push_simd_lane);
 
-        if (varSizeInBits >= 64)
+        if (varSizeInBits <= 32)
         {
-            {
-                addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit5);  // Two+ subregs
-            }
-        }
-        else
-        {
-            if (!isPacked || (varSizeInBits >= 32))
+            if (!isPacked || (varSizeInBits == 32))
             {
                 // If not directly in a register then fp16/int16/fp8/int8 unpacked in 32-bit subregister
                 // as well as 32-bit float/int.
@@ -955,89 +992,88 @@ void CompileUnit::addSimdLane(DIEBlock* Block, DbgVariable& DV, VISAVariableLoca
                 // Four 8-bit float/int in 32-bit subregister.
                 if (varSizeInBits == 16)
                 {
-                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit6);
+                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit4);
                 }
                 else
                 {
                     IGC_ASSERT_MESSAGE(varSizeInBits == 8, "Unexpected packed variable's size");
-                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit7);
+                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit3);
                 }
             }
+        }
+        else
+        {
+            IGC_ASSERT_MESSAGE(varSizeInBits <= 0x80000000, "Too huge variable's size");
+
+            // Verify if variable's size if a power of 2
+            bool isSizePowerOf2 = false;
+            uint64_t powerOf2 = 1 << 5;
+            for (int bitPos = 6; bitPos < 32; bitPos++)
+            {
+                powerOf2 = powerOf2 << 1;
+                if (varSizeInBits == powerOf2)
+                {
+                    isSizePowerOf2 = true;
+                    addUInt(Block, dwarf::DW_FORM_data1, (uint64_t)(dwarf::DW_OP_lit0 + bitPos));
+                }
+            }
+
+            IGC_ASSERT_MESSAGE(isSizePowerOf2 == true, "Missing support for variable size other than power of 2");
         }
 
         addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_shl);
 
-        if (!isPacked)
+        if ((!isPacked) && (!Loc->IsInMemory()))
         {
-            addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const1u);
-            addUInt(Block, dwarf::DW_FORM_data1, varSizeInBits);
+            dwarf::LocationAtom constOP = dwarf::DW_OP_const8u;
+            dwarf::Form form = dwarf::DW_FORM_data8;
+            if (varSizeInBits <= 0xFF)
+            {
+                constOP = dwarf::DW_OP_const1u;
+                form = dwarf::DW_FORM_data1;
+            }
+            else if (varSizeInBits <= 0xFFFF)
+            {
+                constOP = dwarf::DW_OP_const2u;
+                form = dwarf::DW_FORM_data2;
+            }
+            else if (varSizeInBits <= 0xFFFFFFFF)
+            {
+                constOP = dwarf::DW_OP_const4u;
+                form = dwarf::DW_FORM_data4;
+            }
+
+            addUInt(Block, dwarf::DW_FORM_data1, constOP);
+            addUInt(Block, form, varSizeInBits);
             addUInt(Block, dwarf::DW_FORM_data1, DW_OP_INTEL_bit_piece_stack);
         }
         else
         {
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
+
+            // Emit deref for const8u address not for bregx
+            if (!isa<llvm::DbgDeclareInst>(DV.getDbgInst()))
+            {
+                addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_deref);
+            }
         }
     }
 }
 
 // addSimdLaneScalar - add a sequence of attributes to calculate location of scalar variable
 // e.g. a GRF subregister.
-void CompileUnit::addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, uint16_t subReg, bool isPacked)
+void CompileUnit::addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, VISAVariableLocation* Loc, uint16_t subRegInBytes)
 {
     if (IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging))
     {
-        uint64_t varSizeInBits = DV.getBasicSize(DD);
-        // uint64_t varOffsetInBits = DV.getType()->getOffsetInBits(); // TBD MT
+        ///addRegisterOffset(Block, varInfo.getGRF().regNum, 0);
+        uint64_t varSizeInBits = Loc->IsInMemory() ? (uint64_t)Asm->GetPointerSize() * 8 : DV.getBasicSize(DD);
 
-        IGC_ASSERT_MESSAGE(varSizeInBits % 8 == 0, "Variable's size not aligned to byte");
+        auto offsetInBits = subRegInBytes * 8;
 
-        // Scalar in a subregister
-        addUInt(Block, dwarf::DW_FORM_data1, subReg);
-
-        if (varSizeInBits >= 64)
-        {
-            {
-                addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit5);  // Two+ subregs
-            }
-        }
-        else
-        {
-            if (!isPacked || (varSizeInBits >= 32))
-            {
-                IGC_ASSERT_MESSAGE(varSizeInBits % 8 == 0, "Unexpected variable's size");
-                // If not directly in a register then fp16/int16/fp8/int8 unpacked in 32-bit subregister
-                // as well as 32-bit float/int.
-                addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit5);
-            }
-            else
-            {
-                // If directly in a register then fp16/int16/fp8/int8 packed:
-                // Two 16-bit float/int in 32-bit subregister, or
-                // Four 8-bit float/int in 32-bit subregister.
-                if (varSizeInBits == 16)
-                {
-                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit6);
-                }
-                else
-                {
-                    IGC_ASSERT_MESSAGE(varSizeInBits == 8, "Unexpected packed variable's size");
-                    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit7);
-                }
-            }
-        }
-
-        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_shl);
-
-        if (!isPacked)
-        {
-            addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const1u);
-            addUInt(Block, dwarf::DW_FORM_data1, varSizeInBits);
-            addUInt(Block, dwarf::DW_FORM_data1, DW_OP_INTEL_bit_piece_stack);
-        }
-        else
-        {
-            addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
-        }
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bit_piece);
+        addUInt(Block, dwarf::DW_FORM_udata, varSizeInBits);
+        addUInt(Block, dwarf::DW_FORM_udata, offsetInBits);
     }
 }
 
@@ -1748,7 +1784,7 @@ DIE* CompileUnit::constructVariableDIE(DbgVariable& DV, bool isScopeAbstract)
     unsigned Offset = DV.getDotDebugLocOffset();
     if (Offset != ~0U)
     {
-        if (m_pModule->isDirectElfInput)
+        if (DD->IsDirectElfInput())
         {
             // Copy over references ranges to DotLocDebugEntries
             Offset = DD->CopyDebugLoc(Offset);
@@ -1760,7 +1796,7 @@ DIE* CompileUnit::constructVariableDIE(DbgVariable& DV, bool isScopeAbstract)
         }
         else
         {
-            addLabel(VariableDie, dwarf::DW_AT_location,  // TBD MT: SIMD lane?
+            addLabel(VariableDie, dwarf::DW_AT_location,
                 DD->getDwarfVersion() >= 4 ? dwarf::DW_FORM_sec_offset : dwarf::DW_FORM_data4,
                 Asm->GetTempSymbol("debug_loc", Offset));
         }
@@ -1783,7 +1819,9 @@ DIE* CompileUnit::constructVariableDIE(DbgVariable& DV, bool isScopeAbstract)
 
 void CompileUnit::buildLocation(const llvm::Instruction* pDbgInst, DbgVariable& DV, IGC::DIE* VariableDie)
 {
-    VISAVariableLocation Loc = m_pModule->GetVariableLocation(pDbgInst);
+    auto F = pDbgInst->getParent()->getParent();
+    auto VISAModule = DD->GetVISAModule(F);
+    VISAVariableLocation Loc = VISAModule->GetVariableLocation(pDbgInst);
 
     // Variable can be immdeiate or in a location (but not both)
     if (Loc.IsImmediate())
@@ -1800,7 +1838,7 @@ void CompileUnit::buildLocation(const llvm::Instruction* pDbgInst, DbgVariable& 
         else
         {
             VISAModule::DataVector rawData;
-            m_pModule->GetConstantData(pConstVal, rawData);
+            VISAModule->GetConstantData(pConstVal, rawData);
             addConstantData(VariableDie, rawData.data(), rawData.size());
         }
         DV.setDIE(VariableDie);
@@ -1808,7 +1846,7 @@ void CompileUnit::buildLocation(const llvm::Instruction* pDbgInst, DbgVariable& 
     }
 
     bool addDecoration = false;
-    if (m_pModule->isDirectElfInput)
+    if (VISAModule->isDirectElfInput)
     {
         if (Loc.HasSurface())
         {
@@ -1899,7 +1937,7 @@ void CompileUnit::buildLocation(const llvm::Instruction* pDbgInst, DbgVariable& 
         {
             // Add description stating whether variable was vectorized in VISA
             addString(VariableDie, dwarf::DW_AT_description, "vectorized");
-            uint16_t simdSize = m_pModule->GetSIMDSize();
+            uint16_t simdSize = VISAModule->GetSIMDSize();
             addString(VariableDie, dwarf::DW_AT_description,
                 simdSize == 8 ? "simd8" : simdSize == 16 ? "simd16" : "???");
         }
@@ -1976,6 +2014,7 @@ void CompileUnit::buildSampler(DbgVariable& var, DIE* die, VISAVariableLocation*
 
 void CompileUnit::buildSLM(DbgVariable& var, DIE* die, VISAVariableLocation* loc)
 {
+    auto VISAMod = const_cast<VISAModule*>(loc->GetVISAModule());
     if (loc->IsRegister())
     {
         DIEBlock* Block = new (DIEValueAllocator)DIEBlock();
@@ -1984,12 +2023,15 @@ void CompileUnit::buildSLM(DbgVariable& var, DIE* die, VISAVariableLocation* loc
         {
             DbgDecoder::VarInfo varInfo;
             auto regNum = loc->GetRegister();
-            m_pModule->getVarInfo("V", regNum, varInfo);
+            VISAMod->getVarInfo("V", regNum, varInfo);
+
+            if (varInfo.lrs.size() == 0)
+                return;
 
             Address addr;
             addr.Set(Address::Space::eLocal, 0, 0);
 
-            addRegisterOffset(Block, varInfo.getGRF().regNum, 0);
+            addRegisterLoc(Block, varInfo.lrs.front().getGRF().regNum, 0, var.getDbgInst());
 
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_deref_size);
             addUInt(Block, dwarf::DW_FORM_data1, 4);
@@ -2029,9 +2071,7 @@ void CompileUnit::buildSLM(DbgVariable& var, DIE* die, VISAVariableLocation* loc
 
             Address addr;
             addr.Set(Address::Space::eLocal, 0, offset);
-
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
-
             addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
         }
         else
@@ -2053,22 +2093,26 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
 {
     DbgDecoder::VarInfo varInfo;
     auto regNum = loc->GetRegister();
-    m_pModule->getVarInfo("V", regNum, varInfo);
+    auto VISAMod = const_cast<VISAModule*>(loc->GetVISAModule());
+    VISAMod->getVarInfo("V", regNum, varInfo);
 
-    if (varInfo.isGRF())
+    if (varInfo.lrs.size() == 0)
+        return;
+
+    if (varInfo.lrs.front().isGRF())
     {
         DIEBlock* Block = new (DIEValueAllocator)DIEBlock();
-        uint16_t regNum = varInfo.getGRF().regNum;
+        uint16_t regNum = varInfo.lrs.front().getGRF().regNum;
 
         if (!IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging))
         {
-            addRegisterOffset(Block, varInfo.getGRF().regNum, 0);
+            addRegisterLoc(Block, varInfo.lrs.front().getGRF().regNum, 0, var.getDbgInst());
 
-            if (varInfo.getGRF().subRegNum != 0)
+            if (varInfo.lrs.front().getGRF().subRegNum != 0)
             {
-                unsigned int subReg = varInfo.getGRF().subRegNum;
+                unsigned int subReg = varInfo.lrs.front().getGRF().subRegNum;
                 auto offsetInBits = subReg * 8;
-                auto sizeInBits = (m_pModule->m_pShader->getGRFSize() * 8) - offsetInBits;
+                auto sizeInBits = (VISAMod->m_pShader->getGRFSize() * 8) - offsetInBits;
 
                 addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bit_piece);
                 addUInt(Block, dwarf::DW_FORM_udata, sizeInBits);
@@ -2081,24 +2125,24 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
 
             if (loc->IsVectorized() == false)
             {
-                unsigned int subReg = varInfo.getGRF().subRegNum;
-                addRegisterOffset(Block, regNum, 0);
+                unsigned int subReg = varInfo.lrs.front().getGRF().subRegNum;
+                addRegisterLoc(Block, regNum, 0, var.getDbgInst());
 
                 addGTRelativeLocation(Block, loc); // Emit GT-relative location expression
 
-                addSimdLaneScalar(Block, var, subReg, false); // Emit subregister for GRF (unpacked)
+                addSimdLaneScalar(Block, var, loc, subReg); // Emit subregister for GRF (unpacked)
             }
             else
             {
-                uint16_t grfSize = (uint16_t)m_pModule->m_pShader->getGRFSize();
-                uint16_t varSizeInBits = (uint16_t)var.getBasicSize(DD);
+                uint16_t grfSize = (uint16_t)VISAMod->m_pShader->getGRFSize();
+                uint16_t varSizeInBits = loc->IsInMemory() ? (uint16_t)Asm->GetPointerSize() * 8 : (uint16_t)var.getBasicSize(DD);
                 uint16_t varSizeInReg = (uint16_t)(loc->IsInMemory() && varSizeInBits < 32) ? 32 : varSizeInBits;
                 uint16_t numOfRegs = ((varSizeInReg * (uint16_t)DD->simdWidth) > (grfSize * 8)) ?
                     ((varSizeInReg * (uint16_t)DD->simdWidth) / (grfSize * 8)) : 1;
 
                 for (unsigned int vectorElem = 0; vectorElem < loc->GetVectorNumElements(); ++vectorElem)
                 {
-                    addRegisterOffset(Block, regNum, 0);
+                    addRegisterLoc(Block, regNum, 0, var.getDbgInst());
 
                     addGTRelativeLocation(Block, loc); // Emit GT-relative location expression
 
@@ -2112,7 +2156,7 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
 
         addBlock(die, dwarf::DW_AT_location, Block);
     }
-    else if (varInfo.isSpill())
+    else if (varInfo.lrs.front().isSpill())
     {
         // handle spill
         DIEBlock* Block = new (DIEValueAllocator)DIEBlock();
@@ -2120,7 +2164,7 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
         if (!IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging))
         {
             Address addr;
-            addr.Set(Address::Space::eScratch, 0, varInfo.getSpillOffset().memoryOffset);
+            addr.Set(Address::Space::eScratch, 0, varInfo.lrs.front().getSpillOffset().memoryOffset);
 
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
             addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
@@ -2128,23 +2172,28 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
         }
         else
         {
-            uint16_t grfSize = (uint16_t)m_pModule->m_pShader->getGRFSize();
-            uint16_t varSizeInBits = (uint16_t)var.getBasicSize(DD);
+            uint16_t grfSize = (uint16_t)VISAMod->m_pShader->getGRFSize();
+            uint16_t varSizeInBits = loc->IsInMemory() ? (uint16_t)Asm->GetPointerSize() * 8 : (uint16_t)var.getBasicSize(DD);
             uint16_t varSizeInReg = (uint16_t)(loc->IsInMemory() && varSizeInBits < 32) ? 32 : varSizeInBits;
             uint16_t numOfRegs = ((varSizeInReg * (uint16_t)DD->simdWidth) > (grfSize * 8)) ?
                 ((varSizeInReg * (uint16_t)DD->simdWidth) / (grfSize * 8)) : 1;
 
             for (unsigned int vectorElem = 0; vectorElem < loc->GetVectorNumElements(); ++vectorElem)
             {
-                addScratchLocation(Block, &varInfo);
+                addScratchLocation(Block, &varInfo, vectorElem * numOfRegs * grfSize);
                 addSimdLane(Block, var, loc, false); // Emit SIMD lane for spill (unpacked)
-                regNum = regNum + numOfRegs;
+
                 IGC_ASSERT(((DD->simdWidth < 32) && (grfSize == 32)) && "SIMD32 debugging not supported");
             }
         }
 
         addBlock(die, dwarf::DW_AT_location, Block);
     }
+    else
+    {
+        //IGC_ASSERT_MESSAGE(false, "\nVariable neither in GRF nor spilled\n");
+    }
+
 }
 
 /// constructMemberDIE - Construct member DIE from DIDerivedType.

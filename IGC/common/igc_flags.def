@@ -160,22 +160,7 @@ DECLARE_IGC_REGKEY(bool, EnableStatefulToken,           true,  "Enable generatin
 DECLARE_IGC_REGKEY(bool, EnableGenUpdateCB,             false, "Enable derived constant optimization.", false)
 DECLARE_IGC_REGKEY(bool, EnableGenUpdateCBResInfo,      false, "Enable derived constant optimization with resinfo.", false)
 DECLARE_IGC_REGKEY(bool, EnableHighestSIMDForNoSpill,   false,   "When there is no spill choose highest SIMD (compute shader only).", false)
-DECLARE_IGC_REGKEY(bool, EnableFoldsToSourceCheck,      true,  "Enable the check for Folds To Source Propagate for finding interesting constant. This is for the number of instructions that translate to a mov. i.e., Multiplication or Division by 1", false)
-DECLARE_IGC_REGKEY(DWORD, WeightSampler,                10,     "Set the weight for Sampler instruction for finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, WeightSamplerScalarResult,    5,      "Set the weight for scalar of a Sampler instruction for finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, WeightOtherInstruction,       1,      "Set the weight for instruction for finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, WeightExtendedMath,           5,      "Set the weight for Extended math instruction for finding interesting constant ", false)
-DECLARE_IGC_REGKEY(DWORD, WeightSelect,                 10,      "Set the weight for Select instruction for finding interesting constant ", false)
-DECLARE_IGC_REGKEY(DWORD, BaseWeightBranch,             200,     "Set the Base weight for Branch instruction found in finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, WeightBranch,                 20,      "Set the weight for Branch instruction found in finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, BaseWeightLoop,               300,     "Set the Base weight for Loop instruction found in finding interesting constant", false)
-DECLARE_IGC_REGKEY(DWORD, WeightLoop,                   30,      "Set the weight for Loop instruction found in finding interesting constant", false)
 
-
-DECLARE_IGC_REGKEY(DWORD, ConstantLoadTypeCheck,        0,     "Checks the type of the load instruction for finding interesting constant; 0 for skip type check, 1 for Integer and 2 for Float", false)
-DECLARE_IGC_REGKEY(bool, DisableDynamicConstantFolding, false,  "Disable Dynamic Constant Folding", false)
-DECLARE_IGC_REGKEY(bool, EnableLimitForConstantFolding, false,  "Enable limit for constant folding", false)
-DECLARE_IGC_REGKEY(DWORD, LimitNumberOfConstantsToFold, 0,     "Set the limit for number of constants to fold", false)
 DECLARE_IGC_REGKEY(bool, DisableDynamicTextureFolding,  false,  "Disable Dynamic Texture Folding", false)
 DECLARE_IGC_REGKEY(bool, DisableRectListOpt,            false, "Disable Rect List optimization", false)
 
@@ -196,6 +181,8 @@ DECLARE_IGC_REGKEY(bool, EnableLogicalAndToBranch, true,
 DECLARE_IGC_REGKEY(bool, DisableMovingInstanceIDIndexOfVS,  false,   "Disable moving index of InstanceID in VS to last location.", false)
 DECLARE_IGC_REGKEY(bool, EnableSplitUnalignedVector,    true,    "Enable Splitting of unaligned vectors for loads and stores", false)
 DECLARE_IGC_REGKEY(bool, DisableFDivReassociation,      false,   "Disable reassociation for Fdiv operations to avoid precision difference", false)
+DECLARE_IGC_REGKEY(bool, EnableTrigFuncRangeReduction,    false,    "reduce the sin and cosing function domain range", true)
+
 
 DECLARE_IGC_GROUP("Shader debugging")
 DECLARE_IGC_REGKEY(bool, ShaderDebugHashCodeInKernel,   false, "Append hash code to the binary", false)
@@ -232,6 +219,7 @@ DECLARE_IGC_REGKEY(debugString, DisablePassToggles,     0,     "Disable each IGC
 DECLARE_IGC_REGKEY(bool, ForceStatelessForQueueT,       true,  "In OCL, force to use stateless memory to hold queue_t*. This is a legacy feature to be removed.", false)
 DECLARE_IGC_REGKEY(bool, ForceMemoryFenceBeforeEOT,     false, "Forces inserting SLM or gloabal memory fence before EOT if shader writes to SLM or goblam memory respectively.", false)
 DECLARE_IGC_REGKEY(bool, EnableRTmaskPso,               true,  "Enable render target mask optimization in PSO opt", false)
+DECLARE_IGC_REGKEY(bool, FillMissingDebugLocations,     true,  "Enable emiting function entry debug location for instruction that miss DL", false)
 
 DECLARE_IGC_GROUP("Shader dumping")
 DECLARE_IGC_REGKEY(bool, EnableCosDump, false, "Enable cos dump", true)
@@ -256,6 +244,9 @@ DECLARE_IGC_REGKEY(bool, DumpPatchTokens,               false, "Enable dumping o
 DECLARE_IGC_REGKEY(bool, DumpVariableAlias,             false, "Dump variable alias info, valid if EnableVariableAlias is on)", true)
 DECLARE_IGC_REGKEY(bool, DumpDeSSA,                     false, "dump DeSSA info into file.", true)
 DECLARE_IGC_REGKEY(bool, EnableScalarizerDebugLog,      false, "print step by step scalarizer debug info.", true)
+DECLARE_IGC_REGKEY(bool, DumpTimeStats,                 false, "Timing of translation, code generation, finalizer, etc", true)
+DECLARE_IGC_REGKEY(bool, DumpTimeStatsCoarse,           false, "Only collect/dump coarse level time stats, i.e. skip opt detail timer for now", true)
+DECLARE_IGC_REGKEY(bool, DumpTimeStatsPerPass,          false, "Collect Timing of IGC/LLVM passes", true)
 
 DECLARE_IGC_GROUP("Debugging features")
 DECLARE_IGC_REGKEY(bool, InitializeUndefValueEnable,    false, "Setting this to 1/true initializes all undefs in URB payload to 0", false)
@@ -263,6 +254,8 @@ DECLARE_IGC_REGKEY(bool, InitializeRegistersEnable,     false, "Setting this to 
 DECLARE_IGC_REGKEY(bool, InitializeAddressRegistersBeforeUse,     false, "Setting this to 1 (true) initializes address register to 0 before each use", false)
 DECLARE_IGC_REGKEY(bool, EnableSIMDLaneDebugging,       false, "Setting this to 1 (true) enables SIMD lane location expression emmitions for GPU debugger", false)
 DECLARE_IGC_REGKEY(bool, EnableGTLocationDebugging,     false, "Setting this to 1 (true) enables GT location expression emmitions for GPU debugger", false)
+DECLARE_IGC_REGKEY(bool, EnableWriteOldFPToStack,       false, "Setting this to 1 (true) writes the caller frame's frame-pointer to the start of callee's frame on stack, to support stack walk", false)
+DECLARE_IGC_REGKEY(debugString, ExtraOCLOptions,        0,     "Extra options for OpenCL", false)
 
 DECLARE_IGC_GROUP("IGC Features")
 DECLARE_IGC_REGKEY(bool, EnableOCLSIMD16,               true,  "Enable OCL SIMD16 mode", true)
@@ -284,6 +277,7 @@ DECLARE_IGC_REGKEY(bool, allowLICM,                     true,  "Enable LICM in I
 DECLARE_IGC_REGKEY(DWORD, CSSpillThresholdSLM,          12,    "Spill Threshold for CS SIMD16 with SLM", false)
 DECLARE_IGC_REGKEY(DWORD, CSSpillThresholdNoSLM,        5,     "Spill Threshold for CS SIMD16 without SLM", false)
 DECLARE_IGC_REGKEY(DWORD, AllowedSpillRegCount,         0,     "Max allowed spill size without recompile", false)
+DECLARE_IGC_REGKEY(DWORD, LICMStatThreshold,            70,    "LICM stat threshold to avoid retry SIMD16 for CS", false)
 DECLARE_IGC_REGKEY(bool, EnableTypeDemotion,            true,  "Enable Type Demotion", false)
 DECLARE_IGC_REGKEY(bool, EnablePreRARematFlag,          true,  "Enable PreRA Rematerialization of Flag", false)
 DECLARE_IGC_REGKEY(bool, EnableGASResolver,             true,  "Enable GAS Resolver", false)
@@ -410,7 +404,7 @@ DECLARE_IGC_REGKEY(bool, EmitDebugRanges, false, "Emit .debug_ranges section whe
 DECLARE_IGC_REGKEY(bool, EmitDebugLoc, false, "Enable generation of .debug_loc section", false)
 DECLARE_IGC_REGKEY(bool, EnableA64WA, true, "Guarantee A64 load/store addres-hi is uniform", false)
 DECLARE_IGC_REGKEY(bool, EnableZEBinary, false,  "Enable output in ZE binary format", true)
-DECLARE_IGC_REGKEY(bool, OverrideOCLMaxParamSize, 0,  "Override the value imposed on the kernel by CL_DEVICE_MAX_PARAMETER_SIZE. Value in bytes, if value==0 no override happens.", true)
+DECLARE_IGC_REGKEY(DWORD, OverrideOCLMaxParamSize, 0,  "Override the value imposed on the kernel by CL_DEVICE_MAX_PARAMETER_SIZE. Value in bytes, if value==0 no override happens.", true)
 
 DECLARE_IGC_GROUP("Generating precompiled headers")
 DECLARE_IGC_REGKEY(bool, ApplyConservativeRastWAHeader, true, "Apply WaConservativeRasterization for the platforms enabled", false)
@@ -419,3 +413,5 @@ DECLARE_IGC_REGKEY(bool, ApplyConservativeRastWAHeader, true, "Apply WaConservat
 DECLARE_IGC_GROUP("OGL Frontend")
     DECLARE_IGC_REGKEY(bool, OGLMinimumDump, false, "Minimum dump for testing - first and last .ll, .cos and compiler output", true)
 
+DECLARE_IGC_GROUP("VectorCompiler Options")
+    DECLARE_IGC_REGKEY(bool, VCOptimizeNone, false, "Same as -optimize=none in vector compiler options", true)

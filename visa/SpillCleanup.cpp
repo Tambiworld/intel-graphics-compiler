@@ -50,7 +50,7 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
         fp = kernel.fg.getFramePtrDcl();
     unsigned int option = useNoMask ? InstOpt_WriteEnable : 0;
     auto spillInst = kernel.fg.builder->createSpill(kernel.fg.builder->createNullDst(Type_UW), header, spillSrcPayload, 16, payloadSize,
-        GlobalRA::GRFToHwordSize(scratchOffset), fp, static_cast<G4_InstOption>(option), 0, srcCISAOff);
+        GlobalRA::GRFToHwordSize(scratchOffset), fp, static_cast<G4_InstOption>(option));
 
     if (!useNoMask)
     {
@@ -59,10 +59,6 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
     }
 
     spillInst->setCISAOff(srcCISAOff);
-
-#if 0
-    spillInst->dump();
-#endif
 
     return spillSrcPayload;
 }
@@ -94,12 +90,9 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
     if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
         fp = kernel.fg.getFramePtrDcl();
 
-    kernel.fg.builder->createFill(header, fillDst, 16, payloadSize,
-        GlobalRA::GRFToHwordSize(scratchOffset), fp, InstOpt_WriteEnable, 0, srcCISAOff);
-
-#if 0
-    fillInst->dump();
-#endif
+    auto fillInst = kernel.fg.builder->createFill(header, fillDst, 16, payloadSize,
+        GlobalRA::GRFToHwordSize(scratchOffset), fp, InstOpt_WriteEnable);
+    fillInst->setCISAOff(srcCISAOff);
 
     return fillDst;
 }
@@ -141,7 +134,7 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
                 movDst, src, InstOpt_WriteEnable, false);
             copy->setCISAOff(srcCISAOff);
 
-            bb->insert(f, copy);
+            bb->insertBefore(f, copy);
 
             numGRFs -= simdSize == 8 ? 1 : 2;
             rowOff += simdSize == 8 ? 1 : 2;
@@ -222,7 +215,7 @@ void CoalesceSpillFills::coalesceSpills(std::list<INST_LIST_ITER>& coalesceableS
         bb->erase(spill);
     }
     coalesceableSpills.clear();
-    bb->insert(f, coalescedSpillSrc->getInst());
+    bb->insertBefore(f, coalescedSpillSrc->getInst());
 }
 
 void CoalesceSpillFills::coalesceFills(std::list<INST_LIST_ITER>& coalesceableFills, unsigned int min,
@@ -287,7 +280,7 @@ void CoalesceSpillFills::coalesceFills(std::list<INST_LIST_ITER>& coalesceableFi
     }
 
     coalesceableFills.clear();
-    bb->insert(f, coalescedFillDst->getInst());
+    bb->insertBefore(f, coalescedFillDst->getInst());
 
     //    copyToOldFills(coalescedFillDst, indFills, f, bb, srcCISAOff);
 }
@@ -1342,7 +1335,7 @@ void CoalesceSpillFills::fixSendsSrcOverlap()
                             copyDcl->getRegVar(), row, 0, 1, Type_UD);
                         G4_INST* copyInst = kernel.fg.builder->createMov(8, dstRgn, srcRgn, InstOpt_WriteEnable, false);
                         copyInst->setCISAOff(inst->getCISAOff());
-                        bb->insert(instIt, copyInst);
+                        bb->insertBefore(instIt, copyInst);
                         elems -= 8;
                         row++;
                     }
@@ -1764,7 +1757,7 @@ void CoalesceSpillFills::spillFillCleanup()
 
                     G4_INST* mov = kernel.fg.builder->createMov((unsigned char)execSize,
                         nDst, nSrc, InstOpt_WriteEnable, false);
-                    bb->insert(instIt, mov);
+                    bb->insertBefore(instIt, mov);
                     mov->setCISAOff(inst->getCISAOff());
 
                     row += execSize / 8;

@@ -494,7 +494,9 @@ namespace IGC
         {
             type = ISA_TYPE_D;
         }
-        else if (atomic_op == EATOMIC_FMAX || atomic_op == EATOMIC_FMIN || atomic_op == EATOMIC_FCMPWR)
+        else if (atomic_op == EATOMIC_FMAX ||
+            atomic_op == EATOMIC_FMIN ||
+            atomic_op == EATOMIC_FCMPWR)
         {
             type = ISA_TYPE_F;
         }
@@ -2471,6 +2473,9 @@ namespace IGC
         //controls last render target select bit
         cntrls.isLastWrite = lastRenderTarget;
 
+        // controls NULL render target enbale bit
+        cntrls.isNullRT = false;
+
         //r1Reg should always be populated
         //vISA will decide whether to use it or not.
         VISA_RawOpnd* r1RegOpnd = GetRawSource(r1Reg);
@@ -3374,38 +3379,63 @@ namespace IGC
 
     VISA_EMask_Ctrl CEncoder::ConvertMaskToVisaType(e_mask mask, bool noMask)
     {
+        VISA_EMask_Ctrl emaskRet = vISA_EMASK_M1_NM;
         switch (mask)
         {
         case EMASK_Q1:
             if (m_encoderState.m_secondHalf)
             {
-                return noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
+                emaskRet = noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
             }
             else
             {
-                return noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
+                emaskRet = noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
             }
+            break;
         case EMASK_Q2:
             if (m_encoderState.m_secondHalf)
             {
-                return noMask ? vISA_EMASK_M7_NM : vISA_EMASK_M7;
+                emaskRet = noMask ? vISA_EMASK_M7_NM : vISA_EMASK_M7;
             }
             else
             {
-                return noMask ? vISA_EMASK_M3_NM : vISA_EMASK_M3;
+                emaskRet = noMask ? vISA_EMASK_M3_NM : vISA_EMASK_M3;
             }
+            break;
         case EMASK_Q3:
-            return noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
+            emaskRet = noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
+            break;
         case EMASK_Q4:
-            return noMask ? vISA_EMASK_M7_NM : vISA_EMASK_M7;
+            emaskRet = noMask ? vISA_EMASK_M7_NM : vISA_EMASK_M7;
+            break;
         case EMASK_H1:
-            return noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
+            emaskRet = noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
+            break;
         case EMASK_H2:
-            return noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
+            emaskRet = noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "unreachable");
+            emaskRet = vISA_EMASK_M1_NM;
+        }
+
+        if (!m_encoderState.m_secondNibble)
+            return emaskRet;
+
+        switch (emaskRet) {
+        case vISA_EMASK_M1:     return vISA_EMASK_M2;
+        case vISA_EMASK_M1_NM:  return vISA_EMASK_M2_NM;
+        case vISA_EMASK_M3:     return vISA_EMASK_M4;
+        case vISA_EMASK_M3_NM:  return vISA_EMASK_M4_NM;
+        case vISA_EMASK_M5:     return vISA_EMASK_M6;
+        case vISA_EMASK_M5_NM:  return vISA_EMASK_M6_NM;
+        case vISA_EMASK_M7:     return vISA_EMASK_M8;
+        case vISA_EMASK_M7_NM:  return vISA_EMASK_M8_NM;
         default:
             IGC_ASSERT_MESSAGE(0, "unreachable");
             return vISA_EMASK_M1_NM;
         }
+        return vISA_EMASK_M1_NM;
     }
 
     VISA_Modifier ConvertModifierToVisaType(e_modifier modifier)
@@ -4061,8 +4091,9 @@ namespace IGC
             // Turn off jmpi as there is no wa for jmpi
             SaveOption(vISA_EnableScalarJmp, false);
         }
-        if (m_program->m_Platform->getWATable().Wa_1808850743 != 0 &&
-            IGC_GET_FLAG_VALUE(NoMaskWA) > 0)
+        if ((m_program->m_Platform->getWATable().Wa_1808850743 != 0 ||
+             m_program->m_Platform->getWATable().Wa_1409909237)
+            && IGC_GET_FLAG_VALUE(NoMaskWA) > 0)
         {
             SaveOption(vISA_noMaskWA, IGC_GET_FLAG_VALUE(NoMaskWA));
             // Turn off jmpi as there is no wa for jmpi
@@ -4334,6 +4365,9 @@ namespace IGC
         {
             SaveOption(vISA_noSendSrcDstOverlap, true);
         }
+
+        // Set to stitch all functions to all kernels in a VISABuidler
+        SaveOption(vISA_noStitchExternFunc, false);
     }
 
     void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall)
@@ -4342,6 +4376,7 @@ namespace IGC
         m_encoderState.m_SubSpanDestination = false;
         CodeGenContext* context = m_program->GetContext();
         m_encoderState.m_secondHalf = false;
+        m_encoderState.m_secondNibble = false;
         m_enableVISAdump = false;
         labelMap.clear();
         labelMap.resize(m_program->entry->size(), nullptr);
@@ -4508,7 +4543,7 @@ namespace IGC
         m_encoderState = newState;
     }
 
-    static inline VISA_Align GetVISAAlign(CVariable* var)
+    VISA_Align CEncoder:: GetVISAAlign(CVariable* var)
     {
         VISA_Align align;
         switch (var->GetAlign())
@@ -4523,9 +4558,11 @@ namespace IGC
             break;
         case EALIGN_OWORD: align = ALIGN_OWORD;
             break;
-        case EALIGN_GRF: align = ALIGN_GRF;
+        case EALIGN_HWORD: align = ALIGN_HWORD;
             break;
-        case EALIGN_2GRF: align = ALIGN_2_GRF;
+        case EALIGN_32WORD: align = ALIGN_32WORD;
+            break;
+        case EALIGN_64WORD: align = ALIGN_64WORD;
             break;
         default:
             align = ALIGN_UNDEF;
@@ -4590,7 +4627,7 @@ namespace IGC
             pVar->getVisaCString(),
             pVar->GetNumberElement(),
             pVar->GetType(),
-            ALIGN_GRF,
+            ALIGN_HWORD,
             pVar->visaGenVariable[0],
             pVar->GetAliasOffset());
 
@@ -4715,6 +4752,12 @@ namespace IGC
             context->m_retryManager.IsFirstTry();
     }
 
+    void CEncoder::CreateKernelSymbol(const std::string& kernelName, const VISAKernel& visaKernel, SProgramOutput::SymbolLists& symbols)
+    {
+        // kernel symbols are local symbols, and point to the offset 0 of this kernel binary
+        symbols.local.emplace_back(vISA::GenSymType::S_KERNEL, 0, visaKernel.getGenSize(), kernelName);
+    }
+
     void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::SymbolLists& symbols)
     {
         buffer = nullptr;
@@ -4754,9 +4797,11 @@ namespace IGC
                     fEntry.s_offset = (uint32_t)visaFunc->getGenOffset();
                     fEntry.s_size = (uint32_t)visaFunc->getGenSize();
                 }
+                symbolTable.push_back(fEntry);
+
+                // symbols for ZEBinary
                 symbols.function.emplace_back((vISA::GenSymType)fEntry.s_type,
                     fEntry.s_offset, fEntry.s_size, F.getName().str());
-                symbolTable.push_back(fEntry);
             }
         }
 
@@ -4774,7 +4819,7 @@ namespace IGC
                 for (auto ui = pGlobal->user_begin(), ue = pGlobal->user_end(); ui != ue; ui++)
                 {
                     Instruction* inst = dyn_cast<Instruction>(*ui);
-                    if (inst && inst->getParent()->getParent()->hasFnAttribute("EnableGlobalRelocation"))
+                    if (inst && inst->getParent()->getParent()->hasFnAttribute("visaStackCall"))
                     {
                         needSymbol = true;
                         break;
@@ -4798,6 +4843,7 @@ namespace IGC
                     sEntry.s_type = vISA::GenSymType::S_CONST_SAMPLER;
                     sEntry.s_size = 0;
                     sEntry.s_offset = static_cast<uint32_t>(global.second);
+                    // symbols for ZEBinary
                     symbols.sampler.emplace_back((vISA::GenSymType)sEntry.s_type,
                         sEntry.s_offset, sEntry.s_size, name.str());
                 }
@@ -4806,6 +4852,7 @@ namespace IGC
                     sEntry.s_type = (addrSpace == ADDRESS_SPACE_GLOBAL) ? vISA::GenSymType::S_GLOBAL_VAR : vISA::GenSymType::S_GLOBAL_VAR_CONST;
                     sEntry.s_size = int_cast<uint32_t>(pModule->getDataLayout().getTypeAllocSize(pGlobal->getType()->getPointerElementType()));
                     sEntry.s_offset = static_cast<uint32_t>(global.second);
+                    // symbols for ZEBinary
                     if (sEntry.s_type == vISA::GenSymType::S_GLOBAL_VAR)
                         symbols.global.emplace_back((vISA::GenSymType)sEntry.s_type,
                             sEntry.s_offset, sEntry.s_size, name.str());
@@ -4831,19 +4878,22 @@ namespace IGC
         void*& buffer, unsigned& bufferSize, unsigned& tableEntries,
         SProgramOutput::RelocListTy& relocations)
     {
-        buffer = nullptr;
-        bufferSize = 0;
-        tableEntries = 0;
+        if (IGC_IS_FLAG_ENABLED(EnableZEBinary)) {
+            // for ZEBinary format
+            V(vMainKernel->GetRelocations(relocations));
+            IGC_ASSERT(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
+        } else {
+            // for patch-token-based binary format
+            buffer = nullptr;
+            bufferSize = 0;
+            tableEntries = 0;
 
-        IGC_ASSERT(nullptr != vMainKernel);
+            IGC_ASSERT(nullptr != vMainKernel);
 
-        // vISA will directly return the buffer with GenRelocEntry layout
-        V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
-        IGC_ASSERT((sizeof(vISA::GenRelocEntry) * tableEntries) == bufferSize);
-
-        // get relocations
-        V(vMainKernel->GetRelocations(relocations));
-        IGC_ASSERT(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
+            // vISA will directly return the buffer with GenRelocEntry layout
+            V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
+            IGC_ASSERT((sizeof(vISA::GenRelocEntry) * tableEntries) == bufferSize);
+        }
     }
 
     void CEncoder::CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize,
@@ -4899,8 +4949,8 @@ namespace IGC
     void CEncoder::Compile(bool hasSymbolTable)
     {
         IGC_ASSERT(nullptr != m_program);
-        CodeGenContext* context = m_program->GetContext();
-        SProgramOutput* pOutput = m_program->ProgramOutput();
+        CodeGenContext* const context = m_program->GetContext();
+        SProgramOutput* const pOutput = m_program->ProgramOutput();
 
         if (m_program->m_dispatchSize == SIMDMode::SIMD8)
         {
@@ -4956,6 +5006,7 @@ namespace IGC
             // Use the same build options as before
             SetBuilderOptions(vAsmTextBuilder);
 
+            bool vISAAsmParseError = false;
             // Parse the generated VISA text
             if (visaAsmOverride)
             {
@@ -4964,18 +5015,35 @@ namespace IGC
                 asmName.pop_back();
                 vAsmTextBuilder->SetOption(VISA_AsmFileNameUser, true);
                 vAsmTextBuilder->SetOption(VISA_AsmFileName, asmName.c_str());
-                V(vAsmTextBuilder->ParseVISAText(visaAsmOverrideFile));
+                auto result = vAsmTextBuilder->ParseVISAText(visaAsmOverrideFile);
                 asmName = asmName + ".visaasm";
                 appendToShaderOverrideLogFile(asmName, "OVERRIDEN: ");
+                vISAAsmParseError = (result != 0);
             }
             else
             {
-                std::string parseTextFile = m_enableVISAdump ? GetDumpFileName("inline.visaasm") : "";
-                V(vAsmTextBuilder->ParseVISAText(vbuilder->GetAsmTextHeaderStream().str(), vbuilder->GetAsmTextStream().str(), parseTextFile));
+                std::string parseTextFile = GetDumpFileName("inline.visaasm");
+                auto result = vAsmTextBuilder->ParseVISAText(vbuilder->GetAsmTextHeaderStream().str(), vbuilder->GetAsmTextStream().str(), parseTextFile);
+                if (result != 0)
+                {
+                    std::string output;
+                    raw_string_ostream S(output);
+                    S << "parsing vISA inline assembly failed:\t" << vAsmTextBuilder->GetCriticalMsg();
+                    context->EmitError(output.c_str());
+                    vISAAsmParseError = true;
+                }
             }
 
-            pMainKernel = vAsmTextBuilder->GetVISAKernel();
-            vIsaCompile = vAsmTextBuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
+            if (vISAAsmParseError)
+            {
+                COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISACompile);
+                return;
+            }
+            else
+            {
+                pMainKernel = vAsmTextBuilder->GetVISAKernel();
+                vIsaCompile = vAsmTextBuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
+            }
         }
         //Compile to generate the V-ISA binary
         else
@@ -4984,7 +5052,17 @@ namespace IGC
             vIsaCompile = vbuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
         }
 
-        FINALIZER_INFO* jitInfo;
+        COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISACompile);
+
+#if GET_TIME_STATS
+        // handle the vISA time counters differently here
+        if (context->m_compilerTimeStats)
+        {
+            context->m_compilerTimeStats->recordVISATimers();
+        }
+#endif
+
+        FINALIZER_INFO* jitInfo = nullptr;
         pMainKernel->GetJitInfo(jitInfo);
         if (jitInfo->isSpill)
         {
@@ -4995,15 +5073,6 @@ namespace IGC
 
             context->m_retryManager.numInstructions = jitInfo->numAsmCount;
         }
-        COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISACompile);
-
-#if GET_TIME_STATS
-        // handle the vISA time counters differently here
-        if (context->m_compilerTimeStats)
-        {
-            context->m_compilerTimeStats->recordVISATimers();
-        }
-#endif
 
         if (IGC_IS_FLAG_ENABLED(DumpCompilerStats))
         {
@@ -5192,6 +5261,12 @@ namespace IGC
                 pOutput->m_funcSymbolTableSize,
                 pOutput->m_funcSymbolTableEntries,
                 pOutput->m_symbols);
+        }
+        if(IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        {
+            // cretae symbols for kernel. Symbols have name the same as the kernels, and offset to the
+            // start of that kernel
+            CreateKernelSymbol(m_program->entry->getName().str(), *pMainKernel, pOutput->m_symbols);
         }
         CreateRelocationTable(pOutput->m_funcRelocationTable,
             pOutput->m_funcRelocationTableSize,

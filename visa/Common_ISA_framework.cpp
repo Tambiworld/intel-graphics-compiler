@@ -197,7 +197,6 @@ void CisaBinary::initKernel( int kernelIndex, VISAKernelImpl * kernel )
 
     if (!kernel->getIsKernel())
     {
-
         m_header.functions[functionIndex].linkage = 0; // deprecated and MBZ
         m_header.functions[functionIndex].name_len = (unsigned char) nameLen;
         memcpy_s(&m_header.functions[functionIndex].name, COMMON_ISA_MAX_FILENAME_LENGTH, kernel->getName(), m_header.functions[functionIndex].name_len);
@@ -412,6 +411,18 @@ void CisaBinary::patchKernel(int index, unsigned int genxBufferSize, void * buff
     this->genxBinariesSize+= genxBufferSize;
 }
 
+void CisaBinary::patchFunctionWithGenBinary(int index, unsigned int genxBufferSize, char* buffer)
+{
+    m_header.functions[index].offset += genxBinariesSize;
+    size_t copySize = sizeof(m_header.functions[index].offset);
+    memcpy_s(&m_header_buffer[this->m_functionOffsetLocationsArray[index]], copySize, &m_header.functions[index].offset, copySize);
+
+    m_header.functions[index].binary_size = genxBufferSize;
+    m_header.functions[index].genx_binary_buffer = buffer;
+
+    this->genxBinariesSize += genxBufferSize;
+}
+
 void CisaBinary::patchFunction(int index, unsigned genxBufferSize)
 {
     m_header.functions[index].offset += genxBinariesSize;
@@ -465,9 +476,6 @@ void CisaBinary::isaDumpVerify(
             }
         }
     }
-
-    ERROR_LIST_TYPE errors;
-    ERROR_LIST_TYPE kerrors;
 
     std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
     std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
@@ -537,21 +545,12 @@ void CisaBinary::isaDumpVerify(
 
         if (verify)
         {
-            std::list<std::string> kerror_list;
-            std::list<std::string> error_list;
             VISAKernel_format_provider fmt(kTemp);
 
-            verifyKernelHeader(m_header, &fmt, kerrors, m_options);
+            vISAVerifier verifier(m_header, &fmt, m_options);
+            verifier.run(kTemp);
 
-            inst_iter = kTemp->getInstructionListBegin();
-            for(; inst_iter != inst_iter_end; inst_iter++)
-            {
-                CisaFramework::CisaInst * cisa_inst = *inst_iter;
-                CISA_INST * inst = cisa_inst->getCISAInst();
-                verifyInstruction(m_header, &fmt, inst, errors, options);
-            }
-
-            if ( (errors.size() + kerrors.size() /* total errors*/) > 0)
+            if (verifier.hasErrors())
             {
                 stringstream verifierName;
 
@@ -567,11 +566,11 @@ void CisaBinary::isaDumpVerify(
                     verifierName << funcId;
                 }
                 verifierName << ".errors.txt";
-                writeReport(verifierName.str().c_str(), errors, kerrors);
+                verifier.writeReport(verifierName.str().c_str());
                 hasErrors = true;
-                totalErrors += (uint32_t) (errors.size() + kerrors.size());
-                cerr << "Found " << errors.size() + kerrors.size() << " errors in vISA files." << endl;
-                cerr << "Please see error report written to the file "<< verifierName.str() << endl;
+                totalErrors += (uint32_t) verifier.getNumErrors();
+                cerr << "Found " << verifier.getNumErrors() << " errors in vISA files.\n";
+                cerr << "Please see error report written to the file "<< verifierName.str() << "\n";
             }
         }
         if ( hasErrors )
@@ -585,3 +584,15 @@ void CisaBinary::isaDumpVerify(
 
 }
 
+// It's unfortunate we have to define vISAVerifier functions here due to the #include mess..
+void vISAVerifier::run(VISAKernelImpl* kernel)
+{
+    verifyKernelHeader();
+    for (auto iter = kernel->getInstructionListBegin(), iterEnd = kernel->getInstructionListEnd();
+        iter != iterEnd; ++iter)
+    {
+        auto inst = (*iter)->getCISAInst();
+        verifyInstruction(inst);
+    }
+    finalize();
+}

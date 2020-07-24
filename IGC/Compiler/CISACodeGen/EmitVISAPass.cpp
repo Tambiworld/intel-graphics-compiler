@@ -41,6 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "ShaderCodeGen.hpp"
 #include "common/allocator.h"
 #include "common/debug/Dump.hpp"
+#include "common/debug/Dump.hpp"
 #include "common/igc_regkeys.hpp"
 #include "common/Stats.hpp"
 #include "Compiler/CISACodeGen/helper.h"
@@ -128,10 +129,13 @@ uint EmitPass::DecideInstanceAndSlice(llvm::BasicBlock& blk, SDAG& sdag, bool& s
 
     bool hasValidDestination = (sdag.m_root->getType()->getTypeID() != llvm::Type::VoidTyID);
 
-    // Disable for struct type destinations
-    if (sdag.m_root->getType()->isStructTy())
+    // Special case for inline asm with multiple outputs, we will not be able to handle a struct type destination
+    if (CallInst * call = dyn_cast<CallInst>(sdag.m_root))
     {
-        hasValidDestination = false;
+        if (call->isInlineAsm() && call->getType()->isStructTy())
+        {
+            hasValidDestination = false;
+        }
     }
 
     if (hasValidDestination)
@@ -188,8 +192,7 @@ uint EmitPass::DecideInstanceAndSlice(llvm::BasicBlock& blk, SDAG& sdag, bool& s
         if (StoreInst * ST = dyn_cast<StoreInst>(sdag.m_root))
         {
             // Limit to OpenCL so far as it has uniform load/store support.
-            if (m_currShader->GetShaderType() == ShaderType::OPENCL_SHADER &&
-                isUniformStoreOCL(ST))
+            if (isUniformStoreOCL(ST))
                 numInstance = 1;
             slicing = false;
         }
@@ -450,10 +453,7 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         if (hasStackCall)
         {
             m_encoder->InitFuncAttribute(&F, true);
-            CVariable* pStackBase = nullptr;
-            CVariable* pStackSize = nullptr;
-            m_currShader->InitKernelStack(pStackBase, pStackSize);
-            emitAddSP(m_currShader->GetSP(), pStackBase, pStackSize);
+            InitializeKernelStack(&F);
         }
         m_currShader->AddPrologue();
     }
@@ -1854,6 +1854,22 @@ void EmitPass::EmitMinMax(bool isMin, bool isUnsigned, const SSource sources[2],
     EmitSimpleAlu(opCode, dst, srcs[0], srcs[1]);
 }
 
+void IGC::EmitPass::EmitUAdd(llvm::BinaryOperator* inst, const DstModifier& modifier)
+{
+    // the emit function should be called only if saturation is enabled. In other case the signedness of
+    // the instruction doesn't play a role in case of computing the instruction.
+    IGC_ASSERT(modifier.sat == true);
+    CVariable* srcs[2] = { GetSymbol(inst->getOperand(0)), GetSymbol(inst->getOperand(1)) };
+
+    // create new aliases for the operands and the destination
+    srcs[0] = m_currShader->BitCast(srcs[0], GetUnsignedType(srcs[0]->GetType()));
+    srcs[1] = m_currShader->BitCast(srcs[1], GetUnsignedType(srcs[1]->GetType()));
+    CVariable* dst = m_currShader->BitCast(m_destination, GetUnsignedType(m_destination->GetType()));
+    m_encoder->SetDstModifier(modifier);
+
+    EmitSimpleAlu(EOPCODE::llvm_add, dst, srcs[0], srcs[1]);
+}
+
 void EmitPass::EmitFullMul32(bool isUnsigned, const SSource sources[2], const DstModifier& dstMod) {
     CVariable* srcs[2] = { nullptr, nullptr };
     srcs[0] = GetSrcVariable(sources[0]);
@@ -1916,65 +1932,6 @@ void EmitPass::EmitIntegerTruncWithSat(bool isSignedDst, bool isSignedSrc, const
 
     m_encoder->Cast(dst, src);
     m_encoder->Push();
-}
-
-void EmitPass::EmitCopyToStruct(InsertValueInst* inst, const DstModifier& DstMod)
-{
-    auto Iter = m_pattern->StructValueInsertMap.find(inst);
-    IGC_ASSERT(Iter != m_pattern->StructValueInsertMap.end());
-
-    StructType* sTy = dyn_cast<StructType>(inst->getType());
-    auto& DL = inst->getParent()->getParent()->getParent()->getDataLayout();
-    const StructLayout* SL = DL.getStructLayout(sTy);
-
-    // Create a new struct variable with constant values initialized
-    Constant* initValue = Iter->second.first;
-    if (initValue->getValueID() == llvm::Value::ValueTy::UndefValueVal)
-    {
-        initValue = nullptr;
-    }
-    CVariable* DstV = m_currShader->GetStructVariable(inst, initValue);
-
-    unsigned nLanes = DstV->IsUniform() ? 1 : numLanes(m_currShader->m_dispatchSize);
-
-    // Copy each source value into the struct offset
-    auto srcList = Iter->second.second;
-    for (auto src : srcList)
-    {
-        CVariable* SrcV = GetSrcVariable(src.first);
-        unsigned idx = src.second;
-        unsigned elementOffset = (unsigned)SL->getElementOffset(idx);
-        CVariable* elementDst = nullptr;
-        if (SrcV->IsUniform())
-            elementDst = m_currShader->GetNewAlias(DstV, SrcV->GetType(), elementOffset * nLanes, SrcV->GetNumberElement() * nLanes);
-        else
-            elementDst = m_currShader->GetNewAlias(DstV, SrcV->GetType(), elementOffset * nLanes, SrcV->GetNumberElement());
-
-        emitCopyAll(elementDst, SrcV, sTy->getStructElementType(idx));
-    }
-}
-
-void EmitPass::EmitCopyFromStruct(Value* value, unsigned idx, const DstModifier& DstMod)
-{
-    IGC_ASSERT(nullptr != value);
-    IGC_ASSERT(isa<Instruction>(value));
-    CVariable* SrcV = GetSymbol(value);
-    StructType* sTy = dyn_cast<StructType>(value->getType());
-    auto& DL = cast<Instruction>(value)->getParent()->getParent()->getParent()->getDataLayout();
-    const StructLayout* SL = DL.getStructLayout(sTy);
-
-    // For extract value, src and dest should share uniformity
-    IGC_ASSERT(nullptr != m_destination);
-    IGC_ASSERT(nullptr != SrcV);
-    IGC_ASSERT(m_destination->IsUniform() == SrcV->IsUniform());
-
-    bool isUniform = SrcV->IsUniform();
-    unsigned nLanes = isUniform ? 1 : numLanes(m_currShader->m_dispatchSize);
-    unsigned elementOffset = (unsigned)SL->getElementOffset(idx) * nLanes;
-    SrcV = m_currShader->GetNewAlias(SrcV, m_destination->GetType(), elementOffset, m_destination->GetNumberElement(), isUniform);
-
-    // Copy from struct to dest
-    emitCopyAll(m_destination, SrcV, sTy->getStructElementType(idx));
 }
 
 void EmitPass::EmitAddPair(GenIntrinsicInst* GII, const SSource Sources[4], const DstModifier& DstMod) {
@@ -2484,7 +2441,7 @@ void EmitPass::emitExtractMVAndSAD(llvm::GenIntrinsicInst* inst)
     CVariable* pFlag = m_currShader->GetNewVariable(
         16,
         ISA_TYPE_BOOL,
-        IGC::EALIGN_GRF,
+        EALIGN_GRF,
         CName::NONE);
 
     auto EmitCmp = [&](unsigned imm)
@@ -2568,7 +2525,7 @@ void EmitPass::emitCmpSADs(llvm::GenIntrinsicInst* inst)
     CVariable* pFlag = m_currShader->GetNewVariable(
         16,
         ISA_TYPE_BOOL,
-        IGC::EALIGN_GRF,
+        EALIGN_GRF,
         CName::NONE);
 
     CVariable* pSADCurrAlias = m_currShader->GetNewAlias(pSADCurr, ISA_TYPE_UW, 0, 16);
@@ -3469,9 +3426,11 @@ void EmitPass::emitPSInputCst(llvm::Instruction* inst)
     CVariable* inputVar = psProgram->GetInputDelta(setupIndex);
     // temp variable should be the same type as the destination
     {
+        // A0 vertex data are in Rp.{3 + 4*n}
         m_encoder->SetSrcRegion(0, 0, 1, 0);
+        m_encoder->SetSrcSubReg(0, 3);
     }
-    m_encoder->SetSrcSubReg(0, 3);
+
     m_encoder->Cast(m_destination, inputVar);
     m_encoder->Push();
 }
@@ -6994,6 +6953,14 @@ void EmitPass::emitLdmsInstruction(llvm::Instruction* inst)
     {
         CVariable* src = GetSymbol(inst->getOperand(i));
         src = BroadcastIfUniform(src);
+        if (src->GetAliasOffset() % getGRFSize() != 0)
+        {
+            CVariable* tmp = m_currShader->GetNewVariable(src->GetNumberElement(), src->GetType(), EALIGN_GRF,
+                src->IsUniform(), src->GetNumberInstance(), CName(src->getName(), "_GRFAligned"));
+            m_encoder->Copy(tmp, src);
+            m_encoder->Push();
+            src = tmp;
+        }
         payload.push_back(src);
     }
 
@@ -8223,7 +8190,7 @@ void EmitPass::EmitInlineAsm(llvm::CallInst* inst)
     {
         CVariable* opVar = opnds[i];
         StringRef constraint = constraints[i];
-        if (opVar->IsImmediate() && !constraint.equals("i"))
+        if (opVar && opVar->IsImmediate() && !constraint.equals("i"))
         {
             CVariable* tempMov = m_currShader->GetNewVariable(
                 1, opVar->GetType(), EALIGN_GRF, true, opVar->getName());
@@ -8259,7 +8226,7 @@ void EmitPass::EmitInlineAsm(llvm::CallInst* inst)
             IGC_ASSERT_MESSAGE(0, "Invalid operand index");
             return;
         }
-        string varName = m_encoder->GetVariableName(opnds[val]);
+        string varName = opnds[val] ? m_encoder->GetVariableName(opnds[val]) : "null";
         asmStr.replace(varPos, (idEnd - idStart + 1), varName);
 
         startPos = varPos + varName.size();
@@ -9380,6 +9347,88 @@ void EmitPass::emitReturn(llvm::ReturnInst* inst)
     m_currShader->AddEpilogue(inst);
 }
 
+/// Initializes the kernel for stack call by initializing the SP and FP
+void EmitPass::InitializeKernelStack(Function* pKernel)
+{
+    m_currShader->CreateSP();
+    auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    auto pModuleMetadata = pCtx->getModuleMetaData();
+
+    CVariable* pStackBufferBase = m_currShader->GetPrivateBase();
+
+    CVariable* pHWTID = m_currShader->GetHWTID();
+
+    CVariable* pSize = nullptr;
+
+    // Maximun private size in byte, per-workitem
+    // When there's stack call, we don't know the actual stack size being used,
+    // so set a conservative max stack size.
+    uint32_t MaxPrivateSize = m_currShader->GetMaxPrivateMem();
+    if (IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+    {
+        // Experimental: Patch private memory size
+        std::string patchName = "INTEL_PATCH_PRIVATE_MEMORY_SIZE";
+        pSize = m_currShader->GetNewVariable(1, ISA_TYPE_UD, CVariable::getAlignment(getGRFSize()), true, CName(patchName));
+        m_encoder->AddVISASymbol(patchName, pSize);
+    }
+    else
+    {
+        // hard-code per-workitem private-memory size to max size
+        pSize = m_currShader->ImmToVariable(MaxPrivateSize * numLanes(m_currShader->m_dispatchSize), ISA_TYPE_UD);
+    }
+
+    CVariable* pThreadOffset = m_currShader->GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, CName::NONE);
+    m_encoder->Mul(pThreadOffset, pHWTID, pSize);
+    m_encoder->Push();
+
+    unsigned totalAllocaSize = 0;
+
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+    {
+        // reserve space for kernel FP
+        totalAllocaSize += SIZE_OWORD;
+    }
+
+    // reserve space for alloca
+    auto funcMDItr = pModuleMetadata->FuncMD.find(pKernel);
+    if (funcMDItr != pModuleMetadata->FuncMD.end())
+    {
+        if (funcMDItr->second.privateMemoryPerWI != 0)
+        {
+            totalAllocaSize += funcMDItr->second.privateMemoryPerWI * numLanes(m_currShader->m_dispatchSize);
+
+            if ((uint32_t)funcMDItr->second.privateMemoryPerWI > MaxPrivateSize)
+            {
+                pCtx->EmitError("Private memory allocation exceeds max allowed size");
+                IGC_ASSERT(0);
+            }
+        }
+    }
+
+    // Set the total alloca size for the entry function
+    m_encoder->SetFunctionAllocaStackSize(pKernel, totalAllocaSize);
+
+    if (!IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+    {
+        // If we don't return per-function private memory size,
+        // modify private-memory size to a large setting.
+        // This will be reported through patch-tokens as per-kernel requirement.
+        pModuleMetadata->FuncMD[pKernel].privateMemoryPerWI = MaxPrivateSize;
+    }
+
+    // Initialize SP to per-thread kernel stack base
+    CVariable* pSP = m_currShader->GetSP();
+    emitAddSP(pSP, pStackBufferBase, pThreadOffset);
+
+    // Init FP to 0. When doing stack-walk, a zero-value FP indicates stack base
+    CVariable* pFP = m_currShader->GetFP();
+    m_encoder->Copy(pFP, m_currShader->ImmToVariable(0, ISA_TYPE_UQ));
+    m_encoder->Push();
+
+    // Update FP and SP
+    emitPushToStack(m_currShader->ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
+}
+
 /// This function is NOT about the alignment-rule for storing argv into GRF!
 /// It is about the alignment-rule when we pack the arguments into a block for stack-call!
 uint EmitPass::stackCallArgumentAlignment(CVariable* argv)
@@ -9406,6 +9455,130 @@ uint EmitPass::stackCallArgumentAlignment(CVariable* argv)
     }
 }
 
+// Either do a block load or store to the stack-pointer given a vector of function arguments
+uint EmitPass::emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool isWrite)
+{
+    uint32_t offsetS = 0;
+    SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> owordBlks;
+
+    for (auto Arg : Args)
+    {
+        // stack offset is always oword-aligned
+        offsetS = int_cast<unsigned>(llvm::alignTo(offsetS, SIZE_OWORD));
+
+        // calculate block sizes for each arg
+        int32_t RmnBytes = Arg->GetSize();
+        uint32_t BlkBytes = 0;
+        do
+        {
+            uint32_t BlkSize = 0;
+            if (RmnBytes >= SIZE_OWORD * 8)
+            {
+                BlkSize = 8 * SIZE_OWORD;
+            }
+            else if (RmnBytes >= SIZE_OWORD * 4)
+            {
+                BlkSize = 4 * SIZE_OWORD;
+            }
+            else if (RmnBytes >= SIZE_OWORD * 2)
+            {
+                BlkSize = 2 * SIZE_OWORD;
+            }
+            else
+            {
+                BlkSize = SIZE_OWORD;
+            }
+            owordBlks.push_back(std::make_tuple(Arg, offsetS, BlkSize, BlkBytes));
+
+            offsetS += BlkSize;
+            BlkBytes += BlkSize;
+            RmnBytes -= BlkSize;
+        } while (RmnBytes > 0);
+    }
+
+    if (offsetS > 0)
+    {
+        // Get current SP
+        CVariable* pSP = m_currShader->GetSP();
+        bool is64BitSP = (pSP->GetSize() > 4);
+        if (isWrite)
+        {
+            // If storing to stack, first push SP by total store bytes
+            CVariable* pPushSize = m_currShader->ImmToVariable(offsetS, ISA_TYPE_UD);
+            emitAddSP(pSP, pSP, pPushSize);
+        }
+
+        // Load or store each OWORD block to stack
+        for (auto& I : owordBlks)
+        {
+            CVariable* Arg = std::get<0>(I);
+            uint32_t StackOffset = std::get<1>(I);
+            uint32_t BlkSize = std::get<2>(I);
+            uint32_t ArgOffset = std::get<3>(I);
+
+            // offset for each block
+            CVariable* pStackOffset = m_currShader->ImmToVariable(StackOffset - offsetS, ISA_TYPE_D);
+
+            CVariable* pTempSP = m_currShader->GetNewVariable(pSP);
+            emitAddSP(pTempSP, pSP, pStackOffset);
+
+            if (isWrite)
+            {
+                // Write oword block data to stack
+                if (is64BitSP)
+                    m_encoder->OWStoreA64(Arg, pTempSP, BlkSize, ArgOffset);
+                else
+                    m_encoder->OWStore(Arg, ESURFACE_STATELESS, nullptr, pTempSP, BlkSize, ArgOffset);
+                m_encoder->Push();
+            }
+            else
+            {
+                // Read oword block data from stack
+                CVariable* LdDst = Arg;
+                if (Arg->GetType() == ISA_TYPE_BOOL)
+                {
+                    LdDst = m_currShader->GetNewVariable(numLanes(m_currShader->m_dispatchSize), ISA_TYPE_W, EALIGN_HWORD, false, 1, CName::NONE);
+                }
+
+                ResourceDescriptor resource;
+                resource.m_surfaceType = ESURFACE_STATELESS;
+                int RmnBytes = LdDst->GetSize() - ArgOffset;
+                bool needRmCopy = BlkSize == SIZE_OWORD && RmnBytes > 0 && RmnBytes < SIZE_OWORD;
+                if (!needRmCopy)
+                {
+                    if (is64BitSP)
+                        m_encoder->OWLoadA64(LdDst, pTempSP, BlkSize, ArgOffset);
+                    else
+                        m_encoder->OWLoad(LdDst, resource, pTempSP, false, BlkSize, ArgOffset);
+                    m_encoder->Push();
+                }
+                else
+                {
+                    // Reading less than one oword, read one oword, then copy
+                    uint ldDstElemSize = LdDst->GetElemSize();
+                    if (ldDstElemSize > 0)
+                    {
+                        CVariable* pTempDst = m_currShader->GetNewVariable(SIZE_OWORD / ldDstElemSize, LdDst->GetType(), m_currShader->getGRFAlignment(), true, 1, CName::NONE);
+                        if (is64BitSP)
+                            m_encoder->OWLoadA64(pTempDst, pTempSP, SIZE_OWORD);
+                        else
+                            m_encoder->OWLoad(pTempDst, resource, pTempSP, false, SIZE_OWORD);
+                        m_encoder->Push();
+                        emitVectorCopy(LdDst, pTempDst, RmnBytes / ldDstElemSize, ArgOffset, 0);
+                    }
+                }
+                if (LdDst != Arg)
+                {
+                    // only happens to bool
+                    IGC_ASSERT(Arg->GetType() == ISA_TYPE_BOOL);
+                    m_encoder->Cmp(EPREDICATE_NE, Arg, LdDst, m_currShader->ImmToVariable(0, LdDst->GetType()));
+                }
+            }
+        }
+    }
+    return offsetS;
+}
+
 void EmitPass::emitStackCall(llvm::CallInst* inst)
 {
     llvm::Function* F = inst->getCalledFunction();
@@ -9414,7 +9587,7 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
     CVariable* ArgBlkVar = m_currShader->GetARGV();
     uint32_t offsetA = 0;  // visa argument offset
     uint32_t offsetS = 0;  // visa stack offset
-    SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> owordWrites;
+    std::vector<CVariable*> argsOnStack;
     for (uint32_t i = 0; i < inst->getNumArgOperands(); i++)
     {
         CVariable* ArgCV = nullptr;
@@ -9496,73 +9669,13 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
         }
         else
         {
-            // write to stack, stack offset is always oword-aligned
-            offsetS = int_cast<unsigned>(llvm::alignTo(offsetS, SIZE_OWORD));
-            // emit oword_stores
-            int RmnBytes = Src->GetSize();
-            uint32_t WrtBytes = 0;
-            do
-            {
-                uint32_t WrtSize = 0;
-                if (RmnBytes >= SIZE_OWORD * 8)
-                {
-                    WrtSize = 8 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 4)
-                {
-                    WrtSize = 4 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 2)
-                {
-                    WrtSize = 2 * SIZE_OWORD;
-                }
-                else
-                {
-                    WrtSize = SIZE_OWORD;
-                }
-
-                // record list of write
-                owordWrites.push_back(std::make_tuple(Src, offsetS, WrtSize, WrtBytes));
-
-                offsetS += WrtSize;
-                WrtBytes += WrtSize;
-                RmnBytes -= WrtSize;
-            } while (RmnBytes > 0);
+            argsOnStack.push_back(Src);
         }
     }
-    if (offsetS > 0)
-    {
-        // update stack pointer before call
-        CVariable* pSP = m_currShader->GetSP();
-        CVariable* pPushSize = m_currShader->ImmToVariable(offsetS, ISA_TYPE_UD);
-        emitAddSP(pSP, pSP, pPushSize);
-
-        // emit oword-block-writes
-        bool is64BitSP = (pSP->GetSize() > 4);
-        for (auto& I : owordWrites)
-        {
-            CVariable* Src = std::get<0>(I);
-            uint32_t StackOffset = std::get<1>(I);
-            uint32_t WrtSize = std::get<2>(I);
-            uint32_t SrcOffset = std::get<3>(I);
-            CVariable* pTempVar = m_currShader->GetNewVariable(
-                numLanes(SIMDMode::SIMD1),
-                is64BitSP ? ISA_TYPE_UQ : ISA_TYPE_UD,
-                is64BitSP ? EALIGN_QWORD : EALIGN_DWORD, true, 1, CName::NONE);
-            // emit write address
-            CVariable* pStackOffset = m_currShader->ImmToVariable(StackOffset - offsetS, ISA_TYPE_D);
-            emitAddSP(pTempVar, pSP, pStackOffset);
-            // emit oword-store
-            if (is64BitSP)
-                m_encoder->OWStoreA64(Src, pTempVar, WrtSize, SrcOffset);
-            else
-                m_encoder->OWStore(Src, ESURFACE_STATELESS, nullptr, pTempVar, WrtSize, SrcOffset);
-            m_encoder->Push();
-        }
-    }
+    // Write all arguments that does not fit in GRF to stack
+    offsetS = emitStackArgumentLoadOrStore(argsOnStack, true);
 
     uint retSize = 0;
-    bool retOnStack = false;
     if (!inst->use_empty())
     {
         CVariable* Dst = GetSymbol(inst);
@@ -9575,113 +9688,30 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
             retSize = Dst->GetSize();
         }
         CVariable* Src = m_currShader->GetRETV();
-        if (retSize > Src->GetSize())
-        {
-            retOnStack = true;
-        }
+        IGC_ASSERT_MESSAGE(retSize <= Src->GetSize(), "No support for return on stack!");
     }
+
     unsigned char argSizeInGRF = (offsetA + getGRFSize() - 1) / getGRFSize();
-    unsigned char retSizeInGRF = retOnStack ? 0 : (retSize + getGRFSize() - 1) / getGRFSize();
+    unsigned char retSizeInGRF = (retSize + getGRFSize() - 1) / getGRFSize();
 
     // lambda to read the return value
-    auto CopyReturnValue = [this](CallInst* inst, bool isStackCopy)->void
+    auto CopyReturnValue = [this](CallInst* inst)->void
     {
-        if (!isStackCopy)
+        CVariable* Dst = GetSymbol(inst);
+        CVariable* Src = m_currShader->GetRETV();
+        if (Dst->GetType() == ISA_TYPE_BOOL)
         {
-            CVariable* Dst = GetSymbol(inst);
-            CVariable* Src = m_currShader->GetRETV();
-            if (Dst->GetType() == ISA_TYPE_BOOL)
-            {
-                CVariable* SrcAlias = m_currShader->GetNewAlias(Src, ISA_TYPE_W, 0, numLanes(m_currShader->m_dispatchSize), false);
-                m_encoder->Cmp(EPREDICATE_NE, Dst, SrcAlias, m_currShader->ImmToVariable(0, ISA_TYPE_W));
-            }
-            else
-            {
-                IGC_ASSERT(Dst->GetSize() <= Src->GetSize());
-                if (Dst->GetType() != Src->GetType() || Src->IsUniform() != Dst->IsUniform())
-                {
-                    Src = m_currShader->GetNewAlias(Src, Dst->GetType(), 0, Dst->GetNumberElement(), Dst->IsUniform());
-                }
-                emitCopyAll(Dst, Src, inst->getType());
-            }
+            CVariable* SrcAlias = m_currShader->GetNewAlias(Src, ISA_TYPE_W, 0, numLanes(m_currShader->m_dispatchSize), false);
+            m_encoder->Cmp(EPREDICATE_NE, Dst, SrcAlias, m_currShader->ImmToVariable(0, ISA_TYPE_W));
         }
         else
         {
-            CVariable* retDst = GetSymbol(inst);
-            CVariable* Dst = m_currShader->GetNewVariable(retDst);
-
-            int RmnBytes = Dst->GetSize();
-            IGC_ASSERT(Dst->GetType() != ISA_TYPE_BOOL);
-            uint32_t RdBytes = 0;
-            do
+            IGC_ASSERT(Dst->GetSize() <= Src->GetSize());
+            if (Dst->GetType() != Src->GetType() || Src->IsUniform() != Dst->IsUniform())
             {
-                uint RdSize = 0;
-                if (RmnBytes >= SIZE_OWORD * 8)
-                {
-                    RdSize = 8 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 4)
-                {
-                    RdSize = 4 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 2)
-                {
-                    RdSize = 2 * SIZE_OWORD;
-                }
-                else
-                {
-                    RdSize = SIZE_OWORD;
-                }
-
-                CVariable* pSP = m_currShader->GetSP();
-                bool is64BitSP = (pSP->GetSize() > 4);
-                // emit oword-block-read
-                ResourceDescriptor resource;
-                resource.m_surfaceType = ESURFACE_STATELESS;
-                CVariable* pTempVar = m_currShader->GetNewVariable(
-                    numLanes(SIMDMode::SIMD1),
-                    is64BitSP ? ISA_TYPE_UQ : ISA_TYPE_UD,
-                    is64BitSP ? EALIGN_QWORD : EALIGN_DWORD,
-                    true, 1,
-                    CName::NONE);
-                // emit write address
-                CVariable* pStackOffset = m_currShader->ImmToVariable(RdBytes, ISA_TYPE_UD);
-                emitAddSP(pTempVar, pSP, pStackOffset);
-
-                bool needRmCopy = RdSize == SIZE_OWORD && RmnBytes > 0 && RmnBytes < SIZE_OWORD;
-                if (!needRmCopy)
-                {
-                    if (is64BitSP)
-                        m_encoder->OWLoadA64(Dst, pTempVar, RdSize, RdBytes);
-                    else
-                        m_encoder->OWLoad(Dst, resource, pTempVar, false, RdSize, RdBytes);
-                    m_encoder->Push();
-                }
-                else
-                {
-                    uint elemSize = Dst->GetElemSize();
-                    if (elemSize > 0)
-                    {
-                        // less than one oword, read one oword, then copy
-                        CVariable* pTempDst = m_currShader->GetNewVariable(
-                            SIZE_OWORD / elemSize,
-                            Dst->GetType(),
-                            m_currShader->getGRFAlignment(), true, 1, CName::NONE);
-                        if (is64BitSP)
-                            m_encoder->OWLoadA64(pTempDst, pTempVar, SIZE_OWORD);
-                        else
-                            m_encoder->OWLoad(pTempDst, resource, pTempVar, false, SIZE_OWORD);
-                        m_encoder->Push();
-                        m_encoder->SetNoMask();
-                        emitVectorCopy(Dst, pTempDst, RmnBytes / elemSize, RdBytes, 0);
-                    }
-                }
-                RdBytes += RdSize;
-                RmnBytes -= RdSize;
-            } while (RmnBytes > 0); // end of reading return value from stack
-
-            // First do a block read from SP, then a copy that respects the execution mask
-            emitCopyAll(retDst, Dst, inst->getType());
+                Src = m_currShader->GetNewAlias(Src, Dst->GetType(), 0, Dst->GetNumberElement(), Dst->IsUniform());
+            }
+            emitCopyAll(Dst, Src, inst->getType());
         }
     };
 
@@ -9731,7 +9761,7 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
             if (!inst->use_empty())
             {
                 // For non-uniform call, copy the ret inside this loop so that it'll honor the loop mask
-                CopyReturnValue(inst, retOnStack);
+                CopyReturnValue(inst);
             }
 
             // Label for lanes that skipped the call
@@ -9758,18 +9788,15 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
     // Non-uniform handled in above loop
     if (!inst->use_empty() && funcAddr->IsUniform())
     {
-        CopyReturnValue(inst, retOnStack);
+        CopyReturnValue(inst);
     }
 
-    // Set the max stack sized pushed in the parent function for this call's args
-    unsigned totalStackSize = offsetS + (retOnStack ? retSize : 0);
-    if (totalStackSize)
-    {
-        m_encoder->SetFunctionMaxArgumentStackSize(inst->getParent()->getParent(), totalStackSize);
-    }
     if (offsetS > 0)
     {
-        //  update stack pointer after the call
+        // Set the max stack sized pushed in the parent function for this call's args
+        m_encoder->SetFunctionMaxArgumentStackSize(inst->getParent()->getParent(), offsetS);
+
+        //  pop stack pointer after the call
         CVariable* pSP = m_currShader->GetSP();
         CVariable* pPopSize = m_currShader->ImmToVariable((uint64_t)(~offsetS + 1), ISA_TYPE_D);
         emitAddSP(pSP, pSP, pPopSize);
@@ -9789,7 +9816,7 @@ void EmitPass::emitStackFuncEntry(Function* F)
     CVariable* ArgBlkVar = m_currShader->GetARGV();
     uint32_t offsetA = 0;  // visa argument offset
     uint32_t offsetS = 0;  // visa stack offset
-    SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> owordReads;
+    std::vector<CVariable*> argsOnStack;
     for (auto& Arg : F->args())
     {
         if (!F->hasFnAttribute("IndirectlyCalled"))
@@ -9837,113 +9864,21 @@ void EmitPass::emitStackFuncEntry(Function* F)
         }
         else
         {
-            // read from stack, stack offset is always oword-aligned
-            offsetS = int_cast<unsigned>(llvm::alignTo(offsetS, SIZE_OWORD));
-            // emit oword_loads
-            int RmnBytes = Dst->GetSize();
-            if (Dst->GetType() == ISA_TYPE_BOOL)
-            {
-                RmnBytes = numLanes(m_currShader->m_dispatchSize) * SIZE_WORD;
-            }
-            uint32_t RdBytes = 0;
-            do
-            {
-                uint RdSize = 0;
-                if (RmnBytes >= SIZE_OWORD * 8)
-                {
-                    RdSize = 8 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 4)
-                {
-                    RdSize = 4 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 2)
-                {
-                    RdSize = 2 * SIZE_OWORD;
-                }
-                else
-                {
-                    RdSize = SIZE_OWORD;
-                }
-                if (!Arg.use_empty())
-                {
-                    owordReads.push_back(std::make_tuple(Dst, offsetS, RdSize, RdBytes));
-                }
-                offsetS += RdSize;
-                RdBytes += RdSize;
-                RmnBytes -= RdSize;
-            } while (RmnBytes > 0);
+            argsOnStack.push_back(Dst);
         }
     }
     m_encoder->SetStackFunctionArgSize((offsetA + getGRFSize() - 1) / getGRFSize());
-    if (offsetS > 0)
+
+    // Read all stack-pushed args back into registers
+    offsetS = emitStackArgumentLoadOrStore(argsOnStack, false);
+
+    unsigned totalAllocaSize = 0;
+
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
     {
-        CVariable* pSP = m_currShader->GetSP();
-        // emit oword-block-read
-        bool is64bitSP = (pSP->GetSize() > 4);
-        for (auto& I : owordReads)
-        {
-            CVariable* Dst = std::get<0>(I);
-            uint32_t StackOffset = std::get<1>(I);
-            uint32_t RdSize = std::get<2>(I);
-            uint32_t DstOffset = std::get<3>(I);
-            ResourceDescriptor resource;
-            resource.m_surfaceType = ESURFACE_STATELESS;
-            CVariable* pTempVar = m_currShader->GetNewVariable(
-                numLanes(SIMDMode::SIMD1),
-                is64bitSP ? ISA_TYPE_UQ : ISA_TYPE_UD,
-                is64bitSP ? EALIGN_QWORD : EALIGN_DWORD,
-                true, 1, CName::NONE);
-            // emit write address
-            CVariable* pStackOffset = m_currShader->ImmToVariable(StackOffset - offsetS, ISA_TYPE_D);
-            emitAddSP(pTempVar, pSP, pStackOffset);
-            CVariable* LdDst = Dst;
-            if (Dst->GetType() == ISA_TYPE_BOOL)
-            {
-                LdDst = m_currShader->GetNewVariable(
-                    numLanes(m_currShader->m_dispatchSize),
-                    ISA_TYPE_W,
-                    EALIGN_HWORD, false, 1, CName::NONE);
-            }
-
-            int RmnBytes = LdDst->GetSize() - DstOffset;
-            bool needRmCopy = RdSize == SIZE_OWORD && RmnBytes > 0 && RmnBytes < SIZE_OWORD;
-            if (!needRmCopy)
-            {
-                if (is64bitSP)
-                    m_encoder->OWLoadA64(LdDst, pTempVar, RdSize, DstOffset);
-                else
-                    m_encoder->OWLoad(LdDst, resource, pTempVar, false, RdSize, DstOffset);
-                m_encoder->Push();
-            }
-            else
-            {
-                uint ldDstElemSize = LdDst->GetElemSize();
-
-                if (ldDstElemSize > 0)
-                {
-                    // less than one oword, read one oword, then copy
-                    CVariable* pTempDst = m_currShader->GetNewVariable(
-                        SIZE_OWORD / ldDstElemSize,
-                        LdDst->GetType(),
-                        m_currShader->getGRFAlignment(), true, 1, CName::NONE);
-                    if (is64bitSP)
-                        m_encoder->OWLoadA64(pTempDst, pTempVar, SIZE_OWORD);
-                    else
-                        m_encoder->OWLoad(pTempDst, resource, pTempVar, false, SIZE_OWORD);
-                    m_encoder->Push();
-                    emitVectorCopy(LdDst, pTempDst, RmnBytes / ldDstElemSize, DstOffset, 0);
-                }
-            }
-            if (LdDst != Dst)
-            {
-                // only happens to bool
-                m_encoder->Cmp(EPREDICATE_NE, Dst, LdDst, m_currShader->ImmToVariable(0, LdDst->GetType()));
-            }
-        }
+        // reserve space for caller's FP
+        totalAllocaSize += SIZE_OWORD;
     }
-    // save SP before allocation
-    m_currShader->SaveSP();
 
     // reserve space for all the alloca in the function subgroup
     auto funcMDItr = m_currShader->m_ModuleMetadata->FuncMD.find(F);
@@ -9951,13 +9886,7 @@ void EmitPass::emitStackFuncEntry(Function* F)
     {
         if (funcMDItr->second.privateMemoryPerWI != 0)
         {
-            CVariable* pSP = m_currShader->GetSP();
-            unsigned totalAllocaSize = funcMDItr->second.privateMemoryPerWI * numLanes(m_currShader->m_dispatchSize);
-            emitAddSP(pSP, pSP, m_currShader->ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
-
-            // Set the per-function private mem size
-            m_encoder->SetFunctionAllocaStackSize(F, totalAllocaSize);
-
+            totalAllocaSize += funcMDItr->second.privateMemoryPerWI * numLanes(m_currShader->m_dispatchSize);
             if ((uint32_t)funcMDItr->second.privateMemoryPerWI > m_currShader->GetMaxPrivateMem())
             {
                 m_currShader->GetContext()->EmitError("Private memory allocation exceeds max allowed size");
@@ -9965,18 +9894,26 @@ void EmitPass::emitStackFuncEntry(Function* F)
             }
         }
     }
+
+    // save FP before allocation
+    m_currShader->SaveStackState();
+
+    // Update SP and FP
+    emitPushToStack(m_currShader->ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
+
+    // Set the per-function private mem size
+    m_encoder->SetFunctionAllocaStackSize(F, totalAllocaSize);
 }
 
 void EmitPass::emitStackFuncExit(llvm::ReturnInst* inst)
 {
-    // restore SP
-    m_currShader->RestoreSP();
+    // restore SP and FP
+    m_currShader->RestoreStackState();
 
     llvm::Function* F = inst->getParent()->getParent();
     llvm::Type* RetTy = F->getReturnType();
     if (!RetTy->isVoidTy())
     {
-        bool RetOnStack = false;
         unsigned RetSize = 0;
         unsigned nLanes = numLanes(m_currShader->m_dispatchSize);
         CVariable* Dst = m_currShader->GetRETV();
@@ -9990,99 +9927,20 @@ void EmitPass::emitStackFuncExit(llvm::ReturnInst* inst)
             m_encoder->Select(Src, DstAlias, one, zero);
             RetSize = nLanes * SIZE_WORD;
         }
-        else if (Src->IsUniform())
-        {
-            // If Src is uniform, we have to vectorize it since caller cannot assume uniform return value
-            RetSize = nLanes * Src->GetSize();
-            if (Dst->GetSize() < RetSize)
-            {
-                // If return register cannot hold the value, create a new variable to hold it and return on stack
-                RetOnStack = true;
-                Dst = m_currShader->GetNewVariable(
-                    Src->GetNumberElement() * nLanes, Src->GetType(), Src->GetAlign(), false, Src->getName());
-            }
-            if (Dst->GetType() != Src->GetType())
-            {
-                Dst = m_currShader->GetNewAlias(Dst, Src->GetType(), 0, Src->GetNumberElement() * nLanes, false);
-            }
-            emitCopyAll(Dst, Src, RetTy);
-
-            if (RetOnStack)
-            {
-                Src = Dst;
-            }
-        }
-        else  // Non-uniform copy
-        {
-            RetSize = Src->GetSize();
-            if (Dst->GetSize() < RetSize)
-            {
-                RetOnStack = true;
-            }
-            else
-            {
-                if (Dst->GetType() != Src->GetType())
-                {
-                    Dst = m_currShader->GetNewAlias(Dst, Src->GetType(), 0, Src->GetNumberElement(), false);
-                }
-                emitCopyAll(Dst, Src, RetTy);
-            }
-        }
-
-        if (RetOnStack)
-        {
-            // write return value onto stack at (SP+n)
-            // emit oword_stores
-            int RmnBytes = RetSize;
-            uint32_t WrtBytes = 0;
-            do
-            {
-                uint32_t WrtSize = 0;
-                if (RmnBytes >= SIZE_OWORD * 8)
-                {
-                    WrtSize = 8 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 4)
-                {
-                    WrtSize = 4 * SIZE_OWORD;
-                }
-                else if (RmnBytes >= SIZE_OWORD * 2)
-                {
-                    WrtSize = 2 * SIZE_OWORD;
-                }
-                else
-                {
-                    WrtSize = SIZE_OWORD;
-                }
-
-                CVariable* pSP = m_currShader->GetSP();
-                bool is64BitSP = (pSP->GetSize() > 4);
-                // emit oword-block-writes
-                CVariable* pTempVar = m_currShader->GetNewVariable(
-                    numLanes(SIMDMode::SIMD1),
-                    is64BitSP ? ISA_TYPE_UQ : ISA_TYPE_UD,
-                    is64BitSP ? EALIGN_QWORD : EALIGN_DWORD,
-                    true, 1, CName::NONE);
-                // emit write address
-                CVariable* pStackOffset = m_currShader->ImmToVariable(WrtBytes, ISA_TYPE_UD);
-                emitAddSP(pTempVar, pSP, pStackOffset);
-                // emit oword-store
-                if (is64BitSP)
-                    m_encoder->OWStoreA64(Src, pTempVar, WrtSize, WrtBytes);
-                else
-                    m_encoder->OWStore(Src, ESURFACE_STATELESS, nullptr, pTempVar, WrtSize, WrtBytes);
-                m_encoder->Push();
-
-                WrtBytes += WrtSize;
-                RmnBytes -= WrtSize;
-            } while (RmnBytes > 0);
-            // end of writing return-value to stack
-            m_encoder->SetStackFunctionRetSize(0);
-        }
         else
         {
-            m_encoder->SetStackFunctionRetSize((RetSize + getGRFSize() - 1) / getGRFSize());
+            bool isSrcUniform = Src->IsUniform();
+            RetSize = isSrcUniform ? nLanes * Src->GetSize() : Src->GetSize();
+            IGC_ASSERT_MESSAGE(RetSize <= Dst->GetSize(), "No support for return on stack!");
+
+            if (Dst->GetType() != Src->GetType() || Dst->IsUniform() != Src->IsUniform())
+            {
+                unsigned elements = isSrcUniform ? Src->GetNumberElement() * nLanes : Src->GetNumberElement();
+                Dst = m_currShader->GetNewAlias(Dst, Src->GetType(), 0, elements, false);
+            }
+            emitCopyAll(Dst, Src, RetTy);
         }
+        m_encoder->SetStackFunctionRetSize((RetSize + getGRFSize() - 1) / getGRFSize());
     }
     else
     {
@@ -10134,7 +9992,7 @@ void EmitPass::emitSymbolRelocation(Function& F)
         m_currShader->CreateFunctionSymbol(pFunc);
     }
 
-    if (F.hasFnAttribute("EnableGlobalRelocation"))
+    if (F.hasFnAttribute("visaStackCall"))
     {
         SmallSet<GlobalVariable*, 16> globalAddrSymbols;
         for (auto gi = pModule->global_begin(), ge = pModule->global_end(); gi != ge; gi++)
@@ -10419,6 +10277,51 @@ void EmitPass::emitInsert(llvm::Instruction* inst)
         }
         else
         {
+            // Lower execution size to avoid complains of indirectly addressing across more than two GRFs.
+            // One example is below:
+            //(W)     mov (1|M0)              f1.1<1>:uw    0x100:uw
+            //(f1.1)  mov(16|M0)              r[a0.8]<1>:f  r63.0 < 0; 1, 0 >:f
+            //will be changed to
+            //(W)     mov (1|M0)              f1.1<1>:uw    0x100:uw
+            //(f1.1)  mov(8|M8)              r[a0.8+0x20]<1>:f  r63.0 < 0; 1, 0 >:f
+            // To avoid complains, we limit the execSizeNew*datatypesize to the same memory size of getMinDispatchMode()
+            // In above example, say, getMinDispatchMode()==8, that means the execSizeNew should be 8
+            // because 8 * SIZE_DWORD = getMinDispatchMode() * SIZE_DWORD
+            // But if datatype is 64bit, then, execSizeNew should be 4
+            // because 4 * SIZE_QWORD = getMinDispatchMode() * SIZE_DWORD
+            // Changing to simd1 needs more work and might cause extra overhead as well.
+            // indirect address, emaskoffset should be offsetted correspondingly
+            SIMDMode simdMode = std::min(m_currShader->m_SIMDSize, SIMDMode::SIMD16);
+            SIMDMode minDispatchMode = m_currShader->m_Platform->getMinDispatchMode();
+            SIMDMode execSizeNew = minDispatchMode;
+            bool bWAMultiGRF = false;
+            if (m_currShader->m_Platform->enableMultiGRFAccessWA())
+            {
+                uint32_t dataTypeSize = pElement->getType()->getScalarSizeInBits();
+                uint32_t memSizeToUse = numLanes(simdMode) * dataTypeSize / 8;
+                uint32_t memSizeMinDisp = numLanes(minDispatchMode) * SIZE_DWORD;
+                bWAMultiGRF = (memSizeToUse > memSizeMinDisp);
+                if (bWAMultiGRF)
+                {
+                    execSizeNew = lanesToSIMDMode(memSizeMinDisp * 8 / dataTypeSize);
+                    uint32_t lanesNew = numLanes(execSizeNew);
+                    int cnt = memSizeToUse / memSizeMinDisp;
+                    for (int i=1; i<cnt; i++)
+                    {
+                        CVariable* pOffset1_2ndHalf = m_currShader->ImmToVariable(memSizeMinDisp * i, ISA_TYPE_UW);
+                        uint32_t laneIdx = lanesNew * i;
+                        CVariable* pOffset2_2ndHalf = m_currShader->GetNewAlias(pOffset2, ISA_TYPE_UW, laneIdx * SIZE_WORD, 0);
+                        m_encoder->SetSrcRegion(0, lanesNew, lanesNew, 1);
+                        m_encoder->SetSimdSize(execSizeNew);
+                        m_encoder->SetMask((laneIdx / 8) % 2 ? EMASK_Q2 : EMASK_Q1);
+                        m_encoder->SetSecondNibble((laneIdx / 4) % 2 ? true : false);
+                        m_encoder->Add(pOffset2_2ndHalf, pOffset2_2ndHalf, pOffset1_2ndHalf);
+                        m_encoder->Push();
+                    }
+                    m_encoder->SetSecondNibble(false);
+                }
+            }
+
             int loopCount = (m_currShader->m_dispatchSize == SIMDMode::SIMD32 && m_currShader->m_numberInstance == 1) ? 2 : 1;
             for (int i = 0; i < loopCount; ++i)
             {
@@ -10427,7 +10330,6 @@ void EmitPass::emitInsert(llvm::Instruction* inst)
                     // explicitly set second half as we are manually splitting
                     m_encoder->SetSecondHalf(true);
                 }
-                SIMDMode simdMode = std::min(m_currShader->m_SIMDSize, SIMDMode::SIMD16);
                 CVariable* pDstArrElm = m_currShader->GetNewAddressVariable(
                     numLanes(simdMode),
                     m_destination->GetType(),
@@ -10443,13 +10345,10 @@ void EmitPass::emitInsert(llvm::Instruction* inst)
                 // for each simd lane.
                 // Since HW doesn't support scattered GRF writes, we need to simulate
                 // scattered write by a sequence of instructions, each one writing to a single simd-lane.
-                // Also, hardcode to simd8 to avoid complain about possible being across 3 GRFs.
-                // Changing to simd1 needs more work and might cause extra overhead as well.
-                uint numLanesSimd8 = numLanes(SIMDMode::SIMD8);
                 for (uint lane = 0; lane < numLanes(simdMode); ++lane)
                 {
                     uint position = lane + i * 16;
-                    CVariable* immMask = m_currShader->ImmToVariable(1ULL << (lane % numLanesSimd8), ISA_TYPE_UD);
+                    CVariable* immMask = m_currShader->ImmToVariable(1ULL << lane, ISA_TYPE_UD);
                     CVariable* dstPred = m_currShader->GetNewVariable(
                         numLanes(m_SimdMode),
                         ISA_TYPE_BOOL,
@@ -10465,12 +10364,24 @@ void EmitPass::emitInsert(llvm::Instruction* inst)
                     {
                         m_encoder->SetSrcSubReg(0, position);
                     }
-                    m_encoder->SetMask(lane/numLanesSimd8 ? EMASK_Q2 : EMASK_Q1);
                     m_encoder->SetSrcRegion(0, 0, 1, 0);
                     m_encoder->SetDstSubReg(lane);
-                    m_encoder->SetSimdSize(SIMDMode::SIMD8);
+                    if(bWAMultiGRF)
+                    {
+                        m_encoder->SetMask((lane / 8) % 2 ? EMASK_Q2 : EMASK_Q1);
+                        if (execSizeNew == SIMDMode::SIMD4)
+                        {
+                            m_encoder->SetSecondNibble((lane / 4) % 2 ? true : false);
+                        }
+                        m_encoder->SetSimdSize(execSizeNew);
+                    }
+                    else
+                    {
+                        m_encoder->SetSimdSize(simdMode);
+                    }
                     m_encoder->Copy(pDstArrElm, pElemVar);
                     m_encoder->Push();
+                    m_encoder->SetSecondNibble(false);
                 }
             }
         }
@@ -10893,7 +10804,7 @@ CVariable* EmitPass::ExtendVariable(CVariable* pVar, e_alignment uniformAlign) {
         // to align it for SIMD1 gather/scatter.
         if (!pVar->IsUniform())
             return pVar;
-        if (!pVar->IsImmediate() && pVar->IsGRFAligned(uniformAlign))
+        if (!pVar->IsImmediate() && IsGRFAligned(pVar, EALIGN_GRF))
             return pVar;
         // Otherwise, we need to re-align the variable holding that uniform value.
     }
@@ -10977,7 +10888,7 @@ CVariable* EmitPass::TruncatePointer(CVariable* pVar) {
             return pVar;
         // For uniform variable, we need to re-align to GRF to ensure it's
         // placed at the 1st element.
-        if (!pVar->IsImmediate() && pVar->IsGRFAligned())
+        if (!pVar->IsImmediate() && IsGRFAligned(pVar, EALIGN_GRF))
             return pVar;
         // Re-align the container of the pointer.
     }
@@ -11001,7 +10912,7 @@ CVariable* EmitPass::ReAlignUniformVariable(CVariable* pVar, e_alignment align) 
     if (!pVar->IsUniform())
         return pVar;
 
-    if (!pVar->IsImmediate() && pVar->IsGRFAligned(align))
+    if (!pVar->IsImmediate() && IsGRFAligned(pVar, EALIGN_GRF))
         return pVar;
 
     CVariable* NewVar = m_currShader->GetNewVariable(
@@ -11110,7 +11021,7 @@ CVariable* EmitPass::ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue
         dst = m_currShader->GetNewVariable(
             numLanes(m_currShader->m_SIMDSize),
             type,
-            IGC::EALIGN_GRF,
+            EALIGN_GRF,
             false,
             src->getName());
     }
@@ -11119,7 +11030,7 @@ CVariable* EmitPass::ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue
         IGC_ASSERT(0 < dst->GetElemSize());
         IGC_ASSERT(numLanes(m_currShader->m_SIMDSize) == (dst->GetSize() / dst->GetElemSize()));
         IGC_ASSERT(dst->GetType() == type);
-        IGC_ASSERT(dst->GetAlign() == IGC::EALIGN_GRF);
+        IGC_ASSERT(dst->GetAlign() == EALIGN_GRF);
         IGC_ASSERT(!dst->IsUniform());
     }
 
@@ -11471,7 +11382,7 @@ void EmitPass::emitReductionAll(
             temp = m_currShader->GetNewVariable(
                 numLanes(SIMDMode::SIMD16),
                 type,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 false,
                 CName::NONE);
             if (isInt64Mul)
@@ -11733,19 +11644,19 @@ void EmitPass::emitPreOrPostFixOp(
             pMulSrc[0] = m_currShader->GetNewVariable(
                 maxNumLanes,
                 type,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 false,
                 pSrc0->getName());
             pMulSrc[1] = m_currShader->GetNewVariable(
                 maxNumLanes,
                 type,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 false,
                 pSrc1->getName());
             CVariable* pMulDst = m_currShader->GetNewVariable(
                 maxNumLanes,
                 type,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 false,
                 pDst->getName());
 
@@ -11961,7 +11872,7 @@ void EmitPass::emitPreOrPostFixOpScalar(
         result[i] = m_currShader->GetNewVariable(
             numLanes(m_currShader->m_SIMDSize),
             type,
-            IGC::EALIGN_GRF,
+            EALIGN_GRF,
             false,
             CName::NONE);
 
@@ -12001,7 +11912,7 @@ void EmitPass::emitPreOrPostFixOpScalar(
             m_currShader->GetNewVariable(
                 1,
                 type,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 true,
                 result[0]->getName()) : nullptr;
 
@@ -12147,7 +12058,7 @@ void EmitPass::emitScalarAtomics(
     CVariable* pFinalAtomicSrcVal = m_currShader->GetNewVariable(
         1,
         type,
-        isA64 ? IGC::EALIGN_2GRF : IGC::EALIGN_GRF,
+        isA64 ? EALIGN_2GRF : EALIGN_GRF,
         true,
         CName::NONE);
     CVariable* pSrcsArr[2] = { nullptr, nullptr };
@@ -12175,7 +12086,7 @@ void EmitPass::emitScalarAtomics(
     if (pDstAddr->IsImmediate())
     {
         CVariable* pDstAddrCopy = m_currShader->GetNewVariable(
-            1, ISA_TYPE_UD, IGC::EALIGN_GRF, true, CName::NONE);
+            1, ISA_TYPE_UD, EALIGN_GRF, true, CName::NONE);
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
         m_encoder->Copy(pDstAddrCopy, pDstAddr);
@@ -12188,13 +12099,13 @@ void EmitPass::emitScalarAtomics(
 
     CVariable* pReturnVal = returnsImmValue ?
         m_currShader->GetNewVariable(
-            1, ISA_TYPE_UD, IGC::EALIGN_GRF, true, CName::NONE) :
+            1, ISA_TYPE_UD, EALIGN_GRF, true, CName::NONE) :
         nullptr;
 
     if (bitWidth == 16)
     {
         CVariable* pCastAtomicSrcVal =
-            m_currShader->GetNewVariable(1, ISA_TYPE_UD, IGC::EALIGN_GRF, true, CName::NONE);
+            m_currShader->GetNewVariable(1, ISA_TYPE_UD, EALIGN_GRF, true, CName::NONE);
 
         m_encoder->Cast(pCastAtomicSrcVal, pFinalAtomicSrcVal);
         pFinalAtomicSrcVal = pCastAtomicSrcVal;
@@ -12254,7 +12165,7 @@ void EmitPass::emitScalarAtomicLoad(
 {
     if (pDstAddr->IsImmediate())
     {
-        CVariable* pDstAddrCopy = m_currShader->GetNewVariable(1, ISA_TYPE_UD, IGC::EALIGN_GRF, true, pDstAddr->getName());
+        CVariable* pDstAddrCopy = m_currShader->GetNewVariable(1, ISA_TYPE_UD, EALIGN_GRF, true, pDstAddr->getName());
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
         m_encoder->Copy(pDstAddrCopy, pDstAddr);
@@ -12264,7 +12175,7 @@ void EmitPass::emitScalarAtomicLoad(
 
     {
         // pSrc is imm zero
-        CVariable* pSrcCopy = m_currShader->GetNewVariable(1, ISA_TYPE_UD, IGC::EALIGN_GRF, true, pSrc->getName());
+        CVariable* pSrcCopy = m_currShader->GetNewVariable(1, ISA_TYPE_UD, EALIGN_GRF, true, pSrc->getName());
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
         m_encoder->Copy(pSrcCopy, pSrc);
@@ -12279,7 +12190,7 @@ void EmitPass::emitScalarAtomicLoad(
         m_currShader->GetNewVariable(
             1,
             ISA_TYPE_UD,
-            isA64 ? IGC::EALIGN_2GRF : IGC::EALIGN_GRF,
+            isA64 ? EALIGN_2GRF : EALIGN_GRF,
             true,
             pDstAddr->getName()) : nullptr;
 
@@ -12538,7 +12449,7 @@ void EmitPass::emitAtomicRaw(llvm::GenIntrinsicInst* pInsn)
             {
                 CVariable* pDwordAddr =
                     m_currShader->GetNewVariable(numLanes(m_currShader->m_SIMDSize),
-                        ISA_TYPE_D, IGC::EALIGN_GRF, CName::NONE);
+                        ISA_TYPE_D, EALIGN_GRF, CName::NONE);
 
                 m_encoder->Shl(pDwordAddr, pDstAddr,
                     m_currShader->ImmToVariable(0x2, ISA_TYPE_D));
@@ -12671,7 +12582,7 @@ void EmitPass::emitAtomicStructured(llvm::Instruction* pInsn)
         CVariable* pPayload = m_currShader->GetNewVariable(
             parameterLength * numLanes(m_currShader->m_SIMDSize),
             ISA_TYPE_D,
-            IGC::EALIGN_GRF,
+            EALIGN_GRF,
             CName::NONE);
 
         if (m_currShader->m_SIMDSize == SIMDMode::SIMD8)
@@ -12849,7 +12760,7 @@ void EmitPass::emitAtomicTyped(GenIntrinsicInst* pInsn)
             pPayload[i] = m_currShader->GetNewVariable(
                 parameterLength * numLanes(SIMDMode::SIMD8),
                 ISA_TYPE_F,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 CName::NONE);
 
             int writeIndex = 0;
@@ -12974,7 +12885,7 @@ void EmitPass::emitLdStructured(llvm::Instruction* pInsn)
         CVariable* pPayload =
             m_currShader->GetNewVariable(
                 (parameterLength)* numLanes(m_currShader->m_SIMDSize),
-                ISA_TYPE_D, IGC::EALIGN_GRF, CName::NONE);
+                ISA_TYPE_D, EALIGN_GRF, CName::NONE);
 
         const unsigned int numLanesForSimdSize = numLanes(m_currShader->m_SIMDSize);
         IGC_ASSERT(numLanesForSimdSize);
@@ -13126,7 +13037,7 @@ void EmitPass::emitStoreStructured(llvm::Instruction* pInsn)
         CVariable* pPayload = m_currShader->GetNewVariable(
             parameterLength * numLanes(m_currShader->m_SIMDSize),
             ISA_TYPE_D,
-            IGC::EALIGN_GRF,
+            EALIGN_GRF,
             CName::NONE);
 
         uint writeIndex = 0;
@@ -13251,10 +13162,10 @@ void EmitPass::emitTypedRead(llvm::Instruction* pInsn)
         CVariable* flag = nullptr;
         bool needLoop = ResourceLoopHeader(resource, flag, label);
         CVariable* tempdst[4] = { nullptr, nullptr, nullptr, nullptr };
-        bool needsSplit = m_currShader->m_SIMDSize == SIMDMode::SIMD16
-            && !m_currShader->m_Platform->supportsSIMD16TypedRW();
-
-        auto instWidth = SIMDMode::SIMD8;
+        SIMDMode instWidth = std::min(
+            m_currShader->m_Platform->supportsSIMD16TypedRW() ? SIMDMode::SIMD16 : SIMDMode::SIMD8,
+            m_currShader->m_SIMDSize);
+        bool needsSplit = m_currShader->m_SIMDSize > instWidth;
 
         if (!needsSplit)
         {
@@ -13337,16 +13248,17 @@ void EmitPass::emitTypedWrite(llvm::Instruction* pInsn)
         bool needLoop = ResourceLoopHeader(resource, flag, label);
         uint parameterLength = 4;
 
-        bool needsSplit = m_currShader->m_SIMDSize == SIMDMode::SIMD16
-            && !m_currShader->m_Platform->supportsSIMD16TypedRW();
-        auto instWidth = SIMDMode::SIMD8;
+        SIMDMode instWidth = std::min(
+            m_currShader->m_Platform->supportsSIMD16TypedRW() ? SIMDMode::SIMD16 : SIMDMode::SIMD8,
+            m_currShader->m_SIMDSize);
+        bool needsSplit = m_currShader->m_SIMDSize > instWidth;
 
         if (!needsSplit)
         {
             CVariable* pPayload = m_currShader->GetNewVariable(
                 parameterLength * numLanes(m_currShader->m_SIMDSize),
                 ISA_TYPE_F,
-                IGC::EALIGN_GRF,
+                EALIGN_GRF,
                 CName::NONE);
             // pSrcX, Y, Z & W are broadcast to uniform by this function itself.
             m_currShader->CopyVariable(pPayload, pSrc_X, 0);
@@ -13360,14 +13272,18 @@ void EmitPass::emitTypedWrite(llvm::Instruction* pInsn)
         }
         else
         {
-            for (uint i = 0; i < 2; ++i)
+            IGC_ASSERT(instWidth == SIMDMode::SIMD8 ||
+                instWidth == SIMDMode::SIMD16);
+            IGC_ASSERT(m_currShader->m_SIMDSize > instWidth);
+            const uint numInst = numLanes(m_currShader->m_SIMDSize) / numLanes(instWidth);
+            for (uint i = 0; i < numInst; ++i)
             {
                 CVariable* pPayload = nullptr;
 
                 pPayload = m_currShader->GetNewVariable(
                     parameterLength * numLanes(instWidth),
                     ISA_TYPE_F,
-                    IGC::EALIGN_GRF, CName::NONE);
+                    EALIGN_GRF, CName::NONE);
                 setSIMDSizeMask(m_encoder, m_currShader, i);
                 if (!pSrc_X->IsUniform())
                 {
@@ -13693,7 +13609,7 @@ void EmitPass::emitUniformAtomicCounter(llvm::GenIntrinsicInst* pInsn)
         pHeader = m_currShader->GetNewVariable(
             numLanes(SIMDMode::SIMD8),
             ISA_TYPE_UD,
-            IGC::EALIGN_GRF, CName::NONE);
+            EALIGN_GRF, CName::NONE);
 
         m_encoder->SetNoMask();
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
@@ -13705,7 +13621,7 @@ void EmitPass::emitUniformAtomicCounter(llvm::GenIntrinsicInst* pInsn)
     CVariable* pPayload = m_currShader->GetNewVariable(
         8,
         ISA_TYPE_D,
-        IGC::EALIGN_GRF,
+        EALIGN_GRF,
         true, CName::NONE);
     m_encoder->SetSimdSize(SIMDMode::SIMD1);
     m_encoder->SetSrcRegion(0, 0, 1, 0);
@@ -13715,7 +13631,7 @@ void EmitPass::emitUniformAtomicCounter(llvm::GenIntrinsicInst* pInsn)
     dst = m_currShader->GetNewVariable(
         8,
         ISA_TYPE_D,
-        IGC::EALIGN_GRF,
+        EALIGN_GRF,
         true, CName::NONE);
 
     uint messageDescriptor = encodeMessageDescriptorForAtomicUnaryOp(
@@ -13815,7 +13731,7 @@ void EmitPass::emitAtomicCounter(llvm::GenIntrinsicInst* pInsn)
     CVariable* pPayload = m_currShader->GetNewVariable(
         numLanes(SIMDMode::SIMD8),
         ISA_TYPE_UD,
-        IGC::EALIGN_GRF, CName::NONE);
+        EALIGN_GRF, CName::NONE);
     m_encoder->SetNoMask();
     m_encoder->SetSimdSize(SIMDMode::SIMD1);
     m_encoder->SetDstSubReg(7);
@@ -14477,12 +14393,14 @@ void EmitPass::emitftoi(llvm::GenIntrinsicInst* inst)
 // Return true if this store will be emit as uniform store
 bool EmitPass::isUniformStoreOCL(llvm::StoreInst* SI)
 {
-    if (!m_currShader->GetIsUniform(SI->getPointerOperand()))
+    if (m_currShader->GetShaderType() != ShaderType::OPENCL_SHADER ||
+        !m_currShader->GetIsUniform(SI->getPointerOperand()))
     {
         return false;
     }
 
-    Type* Ty = SI->getValueOperand()->getType();
+    Value* storeVal = SI->getValueOperand();
+    Type* Ty = storeVal->getType();
     VectorType* VTy = dyn_cast<VectorType>(Ty);
     uint32_t elts = VTy ? int_cast<uint32_t>(VTy->getNumElements()) : 1;
     Type* eltTy = VTy ? VTy->getElementType() : Ty;
@@ -14493,8 +14411,8 @@ bool EmitPass::isUniformStoreOCL(llvm::StoreInst* SI)
     // Note that when elts > 1, VectorProcess make sure that its element
     // size must be 4 or 8. Also, note that if totalBytes = 4, elts must be 1.
     bool doUniformStore = (elts == 1 ||
-        (m_currShader->GetIsUniform(SI->getValueOperand()) &&
-        (totalBytes == 8 || totalBytes == 12 || totalBytes == 16)));
+        (m_currShader->GetIsUniform(storeVal) &&
+         (totalBytes == 8 || totalBytes == 12 || totalBytes == 16)));
     return doUniformStore;
 }
 
@@ -15131,7 +15049,7 @@ void EmitPass::emitVectorLoad(LoadInst* inst, Value* offset, ConstantInt* immOff
 
         eOffset = ReAlignUniformVariable(eOffset, align);
 
-        bool needTemporary = (totalBytes < 4) || !m_destination->IsGRFAligned();
+        bool needTemporary = (totalBytes < 4) || !IsGRFAligned(m_destination, EALIGN_GRF);
         CVariable* gatherDst = m_destination;
         if (needTemporary)
         {
@@ -15175,7 +15093,7 @@ void EmitPass::emitVectorLoad(LoadInst* inst, Value* offset, ConstantInt* immOff
         bool useOWAligned = false;
         if (rightBlockSize && (useDWAligned || useOWAligned))
         {
-            bool needTemp = (!destUniform || !m_destination->IsGRFAligned());
+            bool needTemp = (!destUniform || !IsGRFAligned(m_destination, EALIGN_GRF));
             CVariable* loadDest = m_destination;
 
             if (useOWAligned)
@@ -15228,7 +15146,7 @@ void EmitPass::emitVectorLoad(LoadInst* inst, Value* offset, ConstantInt* immOff
         (totalBytes == 32 && (useA32 || !m_currShader->m_Platform->hasNoInt64Inst()))))
     {
         bool needTemp = !destUniform ||
-            !m_destination->IsGRFAligned() ||
+            !IsGRFAligned(m_destination, EALIGN_GRF) ||
             totalBytes == 12;
         // For uniform src, we can map value to messages (vector re-layout) as follows
         //   1. A64:
@@ -15476,7 +15394,7 @@ void EmitPass::emitVectorLoad(LoadInst* inst, Value* offset, ConstantInt* immOff
             rawAddrVar = eOffset;
         }
 
-        bool needTemp = (!m_destination->IsGRFAligned());
+        bool needTemp = (!IsGRFAligned(m_destination, EALIGN_GRF));
         CVariable* gatherDst;
         if (needTemp)
         {
@@ -15661,7 +15579,7 @@ void EmitPass::emitVectorStore(StoreInst* inst, Value* offset, ConstantInt* immO
 
             // Prepare stored value
             if (storedVar->IsImmediate() || activelanes < nbelts ||
-                !storedVar->IsGRFAligned(grfAlign))
+                !IsGRFAligned(storedVar, grfAlign))
             {
                 CVariable* NewVar = m_currShader->GetNewVariable(
                     nbelts, storedVar->GetType(), grfAlign, true /*srcUniform*/, CName::NONE);
@@ -15824,6 +15742,215 @@ void EmitPass::emitVectorStore(StoreInst* inst, Value* offset, ConstantInt* immO
     }
 }
 
+// prepareAddressForUniform():       for both load and store
+// prepareDataForUniform():          for store only
+//    Unaligned (less than 4 bytes) uniform load/store. One for address payload,
+//    and the other for data payload.
+//
+//  Example 1:  "store <4xi32> V,  <4xi32>* P, align 2"
+//     A new pointer pVar is create with 4 elements.
+//
+//     add  (4|M0_NM) pVar<1>:ud  P<0;1,0>:UD 0xC840:UV
+//     send (4|M0_NM) pVar   V
+//
+//         prepareAddressForUniform() : create pVar
+//         prepareDataForUniform() : return V (assuming V can be used directly)
+//
+//  Example 2:  "store <3xi32> V,  <3xi32>* P, align 2"
+//     Non-power of 2 vector size is rounded up to the next power of 2.
+//     Additional elements are duplicated with the first vector element.
+
+//     add  (4|M0_NM) pVar<1>:ud  P<0;1,0>:UD 0x0840:UV
+//     mov  (4|M0_NM) vVar<1>:ud  V<0;1,0>:ud
+//     mov  (2|M0_NM) vVar<1>:ud  V<1;1,0>:ud
+//     mov  (1|M0_NM) vVar.2<1>:ud  V.2<1;1,0>:ud
+//     send (4|M0_NM) vVar  pVar
+//
+//         prepareAddressForUniform() : create pVar
+//         prepareDataForUniform() : return vVar
+//
+// This function handles vector size up to 8. It also handles QW element size.
+// When vector size > 4, it uses 0x76543210, left-shifted by 2 (DW) or 3 (QW)
+// as an immediate to be added to 'AddrVar' to form a new address var.
+//
+// In addition, if 64bit add is not supported, emitAddPair() will be used to
+// use 32bit add/addc to emulate 64bit add.
+//
+// Note that argument 'AddrVar' in prepareAddressForUniform() is uniform, so is
+// its return var. The argument 'DataVar' in prepareDataForUniform() is uniform,
+// so is its return var.
+//
+CVariable* EmitPass::prepareAddressForUniform(
+    CVariable* AddrVar, uint32_t EltBytes, uint32_t NElts, uint32_t RequiredNElts, e_alignment Align)
+{
+    // If RequiredNElts == 0,  use next power of 2 of NElts as return var's num of elements.
+    //    otherwise,           user RequiredNElts as return var's num of elements.
+    uint32_t pow2NElts = (uint32_t)PowerOf2Ceil(NElts);
+    uint32_t allocNElts = (RequiredNElts > 0 ? RequiredNElts : pow2NElts);
+    IGC_ASSERT(NElts <= 8 && (EltBytes == 4 || EltBytes == 8));
+    IGC_ASSERT(allocNElts >= pow2NElts);
+    if (allocNElts == NElts && NElts == 1 && IsGRFAligned(AddrVar, Align))
+    {
+        // No need to create a new var.
+        return AddrVar;
+    }
+    bool isA64 = (AddrVar->GetElemSize() == 8);
+    SIMDMode simdmode = lanesToSIMDMode(pow2NElts);
+    CVariable* newVar = m_currShader->GetNewVariable(allocNElts, AddrVar->GetType(), Align, true, CName::NONE);
+
+    CVariable* off;
+    uint32_t incImm = (0x76543210 & maskTrailingOnes<uint32_t>(NElts * 4));
+    if ((pow2NElts <= 4 && EltBytes == 4) || (pow2NElts <= 2 && EltBytes == 8))
+    {
+        // This case needs a single UV immediate
+        incImm = incImm << (EltBytes == 4 ? 2 : 3);
+        off = m_currShader->ImmToVariable(incImm, ISA_TYPE_UV);
+    }
+    else
+    {
+        // Need a temporary var to calculate offsets.
+        // (Note that the temp is non-uniform, otherwise emitAddrPair() won't work.)
+        off = m_currShader->GetNewVariable(pow2NElts, ISA_TYPE_UD, EALIGN_DWORD, false, CName::NONE);
+
+        // Need a mov and mul
+        m_encoder->SetNoMask();
+        m_encoder->SetSimdSize(simdmode);
+        m_encoder->Copy(off, m_currShader->ImmToVariable(incImm, ISA_TYPE_UV));
+        m_encoder->Push();
+
+        m_encoder->SetNoMask();
+        m_encoder->SetSimdSize(simdmode);
+        m_encoder->SetSrcRegion(0, 1, 1, 0);
+        m_encoder->SetSrcRegion(1, 0, 1, 0);
+        m_encoder->Mul(off, off, m_currShader->ImmToVariable(EltBytes, ISA_TYPE_UW));
+        m_encoder->Push();
+    }
+
+    // Only need to initialize pow2NElts elements.
+    if (allocNElts > pow2NElts)
+    {
+        newVar = m_currShader->GetNewAlias(newVar, newVar->GetType(), 0, pow2NElts);
+    }
+
+    // Currently, it's impossible to split because of NElts <= 8. In the future, NElts
+    // could be 32 and we could need to split.
+    bool needSplit = ((pow2NElts * newVar->GetElemSize()) > (2 * (uint32_t)getGRFSize()));
+    if (needSplit)
+    {
+        IGC_ASSERT(!off->IsImmediate());
+        uint32_t halfNElts = pow2NElts / 2;
+        uint32_t bytes1 = halfNElts * newVar->GetElemSize();
+        uint32_t bytes2 = halfNElts * off->GetElemSize();
+        CVariable* newVarHi = m_currShader->GetNewAlias(newVar, newVar->GetType(), 0, halfNElts);
+        CVariable* newVarLo = m_currShader->GetNewAlias(newVar, newVar->GetType(), bytes1, halfNElts);
+        CVariable* offHi = m_currShader->GetNewAlias(off, off->GetType(), 0, halfNElts);
+        CVariable* offLo = m_currShader->GetNewAlias(off, off->GetType(), bytes2, halfNElts);
+
+        if (isA64 && m_currShader->m_Platform->hasNoInt64Inst())
+        {
+            emitAddPair(newVarHi, AddrVar, offHi);
+            emitAddPair(newVarLo, AddrVar, offLo);
+        }
+        else
+        {
+            SIMDMode sm = lanesToSIMDMode(halfNElts);
+            m_encoder->SetNoMask();
+            m_encoder->SetUniformSIMDSize(sm);
+            m_encoder->SetSrcRegion(0, 0, 1, 0);
+            m_encoder->SetSrcRegion(1, 1, 1, 0);
+            m_encoder->Add(newVarHi, AddrVar, offHi);
+            m_encoder->Push();
+
+            m_encoder->SetNoMask();
+            m_encoder->SetUniformSIMDSize(sm);
+            m_encoder->SetSrcRegion(0, 0, 1, 0);
+            m_encoder->SetSrcRegion(1, 1, 1, 0);
+            m_encoder->Add(newVarLo, AddrVar, offLo);
+            m_encoder->Push();
+        }
+    }
+    else if (isA64 && m_currShader->m_Platform->hasNoInt64Inst() && pow2NElts > 1)
+    {
+        emitAddPair(newVar, AddrVar, off);
+    }
+    else
+    {
+        m_encoder->SetNoMask();
+        m_encoder->SetUniformSIMDSize(simdmode);
+        m_encoder->SetSrcRegion(0, 0, 1, 0);
+        m_encoder->SetSrcRegion(1, 1, 1, 0);
+        if (pow2NElts > 1) {
+            m_encoder->Add(newVar, AddrVar, off);
+        }
+        else {
+            m_encoder->Copy(newVar, AddrVar);
+        }
+        m_encoder->Push();
+    }
+    return newVar;
+}
+
+CVariable* EmitPass::prepareDataForUniform(
+    CVariable* DataVar, uint32_t RequiredNElts, e_alignment Align)
+{
+    uint32_t NElts = DataVar->GetNumberElement();
+    uint32_t EltBytes = DataVar->GetElemSize();
+    uint32_t pow2NElts = (uint32_t)(uint32_t)PowerOf2Ceil(NElts);
+    uint32_t allocNElts = RequiredNElts > 0 ? RequiredNElts : pow2NElts;
+    IGC_ASSERT(allocNElts >= pow2NElts && NElts <= 8 && (EltBytes == 4 || EltBytes == 8));
+    if (NElts == allocNElts && !DataVar->IsImmediate() && IsGRFAligned(DataVar, Align))
+    {
+        return DataVar;
+    }
+    CVariable* newVar = m_currShader->GetNewVariable(allocNElts, DataVar->GetType(), Align, true, CName::NONE);
+
+    // Need to return a var with pow2NElts elements
+    if (allocNElts > pow2NElts)
+    {
+        newVar = m_currShader->GetNewAlias(newVar, newVar->GetType(), 0, pow2NElts);
+    }
+
+    // Initialize to DataVar's first element (set Elts from NElts and up to the first element).
+    bool initWithElem0 = (pow2NElts > NElts);
+    bool needSplit = ((pow2NElts *newVar->GetElemSize()) > (2 * (uint32_t)getGRFSize()));
+    if (initWithElem0)
+    {
+        if (needSplit)
+        {
+            uint32_t esz = pow2NElts / 2;
+            uint32_t bytes = esz * newVar->GetElemSize();
+            CVariable* newVarHi = m_currShader->GetNewAlias(newVar, newVar->GetType(), 0, esz);
+            CVariable* newVarLo = m_currShader->GetNewAlias(newVar, newVar->GetType(), bytes, esz);
+
+            m_encoder->SetNoMask();
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(esz));
+            m_encoder->SetSrcRegion(0, 0, 1, 0);
+            m_encoder->Copy(newVarHi, DataVar);
+            m_encoder->Push();
+
+            m_encoder->SetNoMask();
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(esz));
+            m_encoder->SetSrcRegion(0, 0, 1, 0);
+            m_encoder->Copy(newVarLo, DataVar);
+            m_encoder->Push();
+        }
+        else
+        {
+            m_encoder->SetNoMask();
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(pow2NElts));
+            m_encoder->SetSrcRegion(0, 0, 1, 0);
+            m_encoder->Copy(newVar, DataVar);
+            m_encoder->Push();
+        }
+    }
+
+    if (!initWithElem0 || NElts != 1)
+    {
+        emitVectorCopy(newVar, DataVar, NElts);
+    }
+    return newVar;
+}
+
 
 void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
     uint32_t DstSubRegOffset, uint32_t SrcSubRegOffset)
@@ -15957,6 +16084,30 @@ void EmitPass::emitGenISACopy(GenIntrinsicInst* GenCopyInst)
     CVariable* Src = GetSymbol(GenCopyInst->getArgOperand(0));
     Type* Ty = GenCopyInst->getType();
     emitCopyAll(Dst, Src, Ty);
+}
+
+// Puts FP on stack, update FP to SP, then update SP by pushOffset
+void EmitPass::emitPushToStack(CVariable* pushOffset)
+{
+    CVariable* pFP = m_currShader->GetFP();
+    CVariable* pSP = m_currShader->GetSP();
+
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+    {
+        // Store FP value into current SP
+        bool is64BitAddr = (pSP->GetSize() > 4);
+        if (is64BitAddr)
+            m_encoder->OWStoreA64(pFP, pSP, SIZE_OWORD, 0);
+        else
+            m_encoder->OWStore(pFP, ESURFACE_STATELESS, nullptr, pSP, SIZE_OWORD, 0);
+        m_encoder->Push();
+    }
+    // Set FP = SP
+    m_encoder->Copy(pFP, pSP);
+    m_encoder->Push();
+
+    // Update SP by pushOffset
+    emitAddSP(pSP, pSP, pushOffset);
 }
 
 void EmitPass::emitAddSP(CVariable* Dst, CVariable* Src, CVariable* offset)
@@ -16099,32 +16250,6 @@ void EmitPass::emitCopyAll(CVariable* Dst, CVariable* Src, llvm::Type* Ty)
     {
         unsigned NElts = Ty->getVectorNumElements();
         emitVectorCopy(Dst, Src, NElts);
-    }
-    else if (Ty->isStructTy())
-    {
-        IGC_ASSERT(Dst->GetType() == ISA_TYPE_B);
-        IGC_ASSERT(Src->GetType() == ISA_TYPE_B);
-
-        if (!Src->IsUniform() && Dst->IsUniform())
-        {
-            IGC_ASSERT_MESSAGE(0, "Does not support non-uniform to uniform struct copy");
-        }
-
-        StructType* STy = dyn_cast<StructType>(Ty);
-        const StructLayout* SL = m_DL->getStructLayout(STy);
-        unsigned srcLanes = Src->IsUniform() ? 1 : numLanes(m_currShader->m_dispatchSize);
-        unsigned dstLanes = Dst->IsUniform() ? 1 : numLanes(m_currShader->m_dispatchSize);
-        for (unsigned i = 0; i < STy->getNumElements(); i++)
-        {
-            unsigned elementOffset = (unsigned)SL->getElementOffset(i);
-            Type* elementType = STy->getElementType(i);
-            unsigned numElements = elementType->isVectorTy() ? elementType->getVectorNumElements() : 1;
-            VISA_Type visaTy = m_currShader->GetType(elementType);
-
-            CVariable* srcElement = m_currShader->GetNewAlias(Src, visaTy, elementOffset * srcLanes, numElements * srcLanes, Src->IsUniform());
-            CVariable* dstElement = m_currShader->GetNewAlias(Dst, visaTy, elementOffset * dstLanes, numElements * dstLanes, Dst->IsUniform());
-            emitCopyAll(dstElement, srcElement, elementType);
-        }
     }
     else
     {

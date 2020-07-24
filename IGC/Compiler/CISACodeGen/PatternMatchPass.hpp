@@ -171,7 +171,6 @@ namespace IGC
         void visitFPToUIInst(llvm::FPToUIInst& I);
         void visitDbgInfoIntrinsic(llvm::DbgInfoIntrinsic& I);
         void visitExtractValueInst(llvm::ExtractValueInst& I);
-        void visitInsertValueInst(llvm::InsertValueInst& I);
         void visitBranchInst(llvm::BranchInst& I);
 
     public:
@@ -205,7 +204,8 @@ namespace IGC
 
         Pattern* Match(llvm::Instruction& inst);
         bool MatchAbsNeg(llvm::Instruction& I);
-        bool MatchSatModifier(llvm::Instruction& I);
+        bool MatchFloatingPointSatModifier(llvm::Instruction& I);
+        bool MatchIntegerSatModifier(llvm::Instruction& I);
         bool MatchPredicate(llvm::SelectInst& I);
         bool MatchSelectModifier(llvm::SelectInst& I);
         bool MatchPow(llvm::IntrinsicInst& I);
@@ -229,7 +229,7 @@ namespace IGC
         std::tuple<llvm::Value*, unsigned, VISA_Type> isFPToIntegerSatWithExactConstant(llvm::CastInst* I);
         std::tuple<llvm::Value*, unsigned, VISA_Type> isFPToSignedIntSatWithInexactConstant(llvm::SelectInst* I);
         std::tuple<llvm::Value*, unsigned, VISA_Type> isFPToUnsignedIntSatWithInexactConstant(llvm::SelectInst* I);
-        bool MatchIntegerSatModifier(llvm::SelectInst& I);
+        bool MatchIntegerTruncSatModifier(llvm::SelectInst& I);
         std::tuple<llvm::Value*, bool, bool> isIntegerSatTrunc(llvm::SelectInst*);
 
         bool MatchSIToFPZExt(llvm::SIToFPInst* S2FI);
@@ -238,9 +238,6 @@ namespace IGC
         bool matchSubPair(llvm::ExtractValueInst*);
         bool matchMulPair(llvm::ExtractValueInst*);
         bool matchPtrToPair(llvm::ExtractValueInst*);
-
-        bool MatchCopyToStruct(llvm::InsertValueInst*);
-        bool MatchCopyFromStruct(llvm::ExtractValueInst*);
 
         void AddPattern(Pattern* P)
         {
@@ -293,13 +290,6 @@ namespace IGC
         typedef llvm::DenseMap<llvm::Value*, PairOutputTy> PairOutputMapTy;
         PairOutputMapTy PairOutputMap;
 
-        // Maps the final insertvalue instruction to a struct type to:
-        // The initial value of the struct
-        // A vector of sources and the corresponding index into the struct
-        // [InsertValueInst] -> [Constant Init Value][vector<[Source][Idx]>]
-        typedef llvm::DenseMap<llvm::InsertValueInst*, std::pair<llvm::Constant*, std::vector<std::pair<SSource, unsigned>>>> StructValueInsertMapTy;
-        StructValueInsertMapTy StructValueInsertMap;
-
         llvm::Instruction* m_root;
         Pattern* m_currentPattern;
 
@@ -334,7 +324,7 @@ namespace IGC
     bool IsNegate(llvm::BinaryOperator& modifier, llvm::Value*& negateSource);
     bool IsZero(llvm::Value* v);
     bool isAbs(llvm::Value* abs, e_modifier& mod, llvm::Value*& source);
-    bool isSat(llvm::Instruction* sat, llvm::Value*& source);
+    bool isSat(llvm::Instruction* sat, llvm::Value*& source, bool& isUnsigned);
     bool isOne(llvm::Value* zero);
     bool isMinOrMax(llvm::Value* inst, llvm::Value*& source0, llvm::Value*& source1, bool& isMin, bool& isUnsigned);
     bool isCandidateForConstantPool(llvm::Value * val);

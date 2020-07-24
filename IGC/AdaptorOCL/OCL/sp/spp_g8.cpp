@@ -238,7 +238,7 @@ void CGen8OpenCLProgram::GetZEBinary(
         return (shader && shader->ProgramOutput()->m_programSize > 0);
     };
 
-    ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes, m_pContext->m_programInfo);
+    ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8, m_pContext->m_programInfo);
 
     for (auto pKernel : m_ShaderProgramList)
     {
@@ -402,6 +402,22 @@ void CGen8CMProgram::CreateKernelBinaries()
 
         m_KernelBinaries.push_back(data);
     }
+}
+
+void CGen8CMProgram::GetZEBinary(
+    llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes)
+{
+    ZEBinaryBuilder zebuilder{m_Platform, pointerSizeInBytes == 8, *m_programInfo};
+
+    for (auto *kernel : m_kernels)
+    {
+        zebuilder.createKernel(
+            reinterpret_cast<const char*>(kernel->m_prog.m_programBin),
+            kernel->m_prog.m_programSize,
+            kernel->m_kernelInfo,
+            kernel->m_GRFSizeInBytes);
+    }
+    zebuilder.getBinaryObject(programBinary);
 }
 
 } // namespace iOpenCL

@@ -3,6 +3,7 @@
 #
 cmake_minimum_required (VERSION 3.8)
 
+
 project ("ZEBinaryUtilities")
 
 find_package(LLVM REQUIRED CONFIG)
@@ -21,6 +22,9 @@ add_definitions(${LLVM_DEFINITIONS})
 set(VS_DEBUG_COMPILER_OPTIONS
     /MTd
 )
+
+set (CMAKE_C_FLAGS "-DZEBinStandAloneBuild")
+set (CMAKE_CXX_FLAGS "-DZEBinStandAloneBuild")
 
 # Include sub-projects.
 add_subdirectory ("zebin")

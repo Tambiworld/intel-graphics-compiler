@@ -655,7 +655,7 @@ private:
         G4_Declare *      mRangeDcl,
         unsigned          regOff,
         unsigned          height,
-        unsigned          srcRegOff = 0
+        unsigned          spillOff
     );
 
     G4_INST *
@@ -693,7 +693,7 @@ private:
         G4_Declare *      mRangeDcl,
         unsigned          regOff,
         unsigned          height,
-        unsigned          srcRegOff = 0
+        unsigned          spillOff
     );
 
     G4_INST *
@@ -701,12 +701,10 @@ private:
         G4_Declare *       fillRangeDcl,
         G4_Declare *       mRangeDcl,
         G4_SrcRegRegion *  filledRangeRegion,
-        unsigned           execSize,
-        unsigned           regOff = 0
+        unsigned           execSize
     );
 
-    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, unsigned regOff, unsigned height, unsigned srcRegOff = 0);
-    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, G4_SrcRegRegion* filledRangeRegion, unsigned execSize, unsigned regOff = 0);
+    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, unsigned regOff, unsigned height, unsigned srcRegOff);
 
     void
     replaceSpilledRange (
@@ -847,7 +845,11 @@ private:
         return needed;
     }
 
-    void saveRestoreA0(G4_BB*);
+    // return true if offset for spill/fill message needs to be 32byte aligned
+    bool need32ByteAlignedOffset() const
+    {
+        return useScratchMsg_ || useSplitSend();
+    }
 };
 }
 bool isDisContRegion (

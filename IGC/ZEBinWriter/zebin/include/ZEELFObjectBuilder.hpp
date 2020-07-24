@@ -36,9 +36,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <ZEELF.h>
 #include <ZEInfo.hpp>
 
+#ifndef ZEBinStandAloneBuild
 #include "common/LLVMWarningsPush.hpp"
+#endif
+
 #include "llvm/BinaryFormat/ELF.h"
+
+#ifndef ZEBinStandAloneBuild
 #include "common/LLVMWarningsPop.hpp"
+#endif
 
 #include <map>
 #include <string>
@@ -328,7 +334,9 @@ private:
 
     // every ze object contains only one ze_info section
     ZEInfoSection* m_zeInfoSection = nullptr;
-    SymbolListTy m_symbols;
+    SymbolListTy m_localSymbols;
+    SymbolListTy m_globalSymbols;
+
 };
 
 /// ZEInfoBuilder - Build a zeInfoContainer for .ze_info section

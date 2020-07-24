@@ -54,43 +54,54 @@ OpenCLPrintfAnalysis::OpenCLPrintfAnalysis() : ModulePass(ID)
     initializeOpenCLPrintfAnalysisPass(*PassRegistry::getPassRegistry());
 }
 
+//TODO: move to a common place
 const StringRef OpenCLPrintfAnalysis::OPENCL_PRINTF_FUNCTION_NAME = "printf";
 
 bool OpenCLPrintfAnalysis::runOnModule(Module& M)
 {
-    m_hasPrintf = false;
+    m_pMDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
 
     visit(M);
-
-    if (m_hasPrintf)
+    bool changed = false;
+    if (m_hasPrintfs.size())
     {
         for (Function& func : M.getFunctionList())
         {
-            if (!func.isDeclaration())
+            if (!func.isDeclaration() &&
+                m_hasPrintfs.find(&func) != m_hasPrintfs.end())
             {
                 addPrintfBufferArgs(func);
+                changed = true;
             }
         }
     }
 
-    return m_hasPrintf;
+    // Update LLVM metadata based on IGC MetadataUtils
+    if (changed)
+        m_pMDUtils->save(M.getContext());
+
+    return m_hasPrintfs.size();
 }
 
 void OpenCLPrintfAnalysis::visitCallInst(llvm::CallInst& callInst)
 {
-    if (!callInst.getCalledFunction())
+    Function* pF = callInst.getParent()->getParent();
+    if (!callInst.getCalledFunction() || m_hasPrintfs.find(pF)!=m_hasPrintfs.end())
     {
         return;
     }
 
     StringRef  funcName = callInst.getCalledFunction()->getName();
-    m_hasPrintf |= (funcName == OpenCLPrintfAnalysis::OPENCL_PRINTF_FUNCTION_NAME);
+    bool hasPrintf = (funcName == OpenCLPrintfAnalysis::OPENCL_PRINTF_FUNCTION_NAME);
+    if (hasPrintf)
+    {
+        m_hasPrintfs.insert(pF);
+    }
 }
 
 void OpenCLPrintfAnalysis::addPrintfBufferArgs(Function& F)
 {
     SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-    MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     implicitArgs.push_back(ImplicitArg::PRINTF_BUFFER);
-    ImplicitArgs::addImplicitArgs(F, implicitArgs, pMdUtils);
+    ImplicitArgs::addImplicitArgs(F, implicitArgs, m_pMDUtils);
 }

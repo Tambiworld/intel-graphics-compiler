@@ -245,7 +245,6 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     // Otherwise, need to be set individually.
     desc.value = fCtrl;
 
-
     desc.layout.rspLength = regs2rcv;
     desc.layout.msgLength = regs2snd;
 
@@ -751,8 +750,7 @@ G4_INST::G4_INST(const IR_Builder& irb,
     useInstList(irb.getAllocator()),
     defInstList(irb.getAllocator()),
     local_id(0),
-    srcCISAoff(-1),
-    location(NULL),
+    srcCISAoff(UndefinedCisaOffset),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
@@ -795,8 +793,7 @@ G4_INST::G4_INST(const IR_Builder& irb,
     useInstList(irb.getAllocator()),
     defInstList(irb.getAllocator()),
     local_id(0),
-    srcCISAoff(-1),
-    location(NULL),
+    srcCISAoff(UndefinedCisaOffset),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
@@ -1097,6 +1094,22 @@ uint16_t G4_INST::getMaskOffset() const
         MUST_BE_TRUE(0, "Incorrect instruction execution mask");
         return 0;
     }
+}
+
+void G4_INST::setMetadata(const std::string& key, MDNode* value)
+{
+    if (!MD)
+    {
+        MD = const_cast<IR_Builder&>(builder).allocateMD();
+    }
+    MD->setMetadata(key, value);
+}
+
+void G4_INST::setComments(const std::string& str)
+{
+    // we create a new MDNode the assumption is that comment should be unique and there is no opportunity for sharing
+    auto node = const_cast<IR_Builder&>(builder).allocateMDString(str);
+    setMetadata(Metadata::InstComment, node);
 }
 
 //
@@ -1849,6 +1862,7 @@ G4_INST::MovType G4_INST::canPropagate() const
 
     G4_Type dstType = dst->getType();
     G4_Type srcType = src->getType();
+
 
     G4_SrcModifier srcMod = Mod_src_undef;
     if (src->isSrcRegRegion()) {
@@ -5472,7 +5486,7 @@ PhyRegPool::PhyRegPool(Mem_Manager& m, unsigned int maxRegisterNumber)
     ARF_Table[AREG_ACC1]     = new (m) G4_Areg(AREG_ACC1);
     ARF_Table[AREG_MASK0]    = new (m) G4_Areg(AREG_MASK0);
     ARF_Table[AREG_MS0]      = new (m) G4_Areg(AREG_MS0);
-    ARF_Table[AREG_DBG]     = new (m) G4_Areg(AREG_DBG);
+    ARF_Table[AREG_DBG]      = new (m) G4_Areg(AREG_DBG);
     ARF_Table[AREG_SR0]      = new (m) G4_Areg(AREG_SR0);
     ARF_Table[AREG_CR0]      = new (m) G4_Areg(AREG_CR0);
     ARF_Table[AREG_TM0]      = new (m) G4_Areg(AREG_TM0);
@@ -5575,13 +5589,23 @@ void G4_Declare::emit(std::ostream &output) const
     }
     else if (isSpilled())
     {
-        if (spillDCL != nullptr)
+        if (spillDCL)
         {
+            // flag/addr spill
             output << " (spilled -> " << spillDCL->getName() << ")";
         }
         else
         {
-            output << " (spilled)";
+            // GRF spill
+            auto GRFOffset = getRegVar()->getDisp() / getGRFSize();
+            if (!AliasDCL)
+            {
+                output << " (spilled -> Scratch[" << GRFOffset << "x" << (int)getGRFSize() << "])";
+            }
+            else
+            {
+                output << " (spilled)";
+            }
         }
     }
 
@@ -7413,6 +7437,11 @@ void associateOpndWithInst(G4_Operand* opnd, G4_INST* inst)
     }
 }
 
+const std::vector<std::pair<uint32_t, uint32_t>>& LiveIntervalInfo::getSaveRestore()
+{
+    return saveRestore;
+}
+
 void LiveIntervalInfo:: getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals)
 {
     for (auto&& it : liveIntervals)
@@ -7724,12 +7753,17 @@ bool G4_INST::canDstBeAcc() const
         return false;
     }
 
-    if (dst == nullptr || dst->getTopDcl() == nullptr || dst->asDstRegRegion()->getHorzStride() != 1)
+    if (dst == nullptr || dst->getTopDcl() == nullptr || dst->getHorzStride() != 1)
     {
         return false;
     }
 
     if (dst->getTopDcl()->getRegFile() != G4_GRF)
+    {
+        return false;
+    }
+
+    if (!builder.hasFP64Acc() && dst->getType() == Type_DF)
     {
         return false;
     }
@@ -8115,3 +8149,10 @@ G4_INST* G4_InstMath::cloneInst()
         src0, src1, getMathCtrl(), option, getLineNo(), getCISAOff(), getSrcFilename());
 }
 
+
+void G4_INST::inheritDIFrom(const G4_INST* inst)
+{
+    // Copy over debug info from inst
+    setLocation(inst->getLocation());
+    setCISAOff(getCISAOff() == UndefinedCisaOffset ? inst->getCISAOff() : getCISAOff());
+}

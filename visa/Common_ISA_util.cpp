@@ -53,6 +53,9 @@ const char* Common_ISA_Get_Align_Name(VISA_Align align)
         "oword",
         "GRF",
         "GRFx2", // "2GRF"
+        "hword",
+        "wordx32",
+        "wordx64",
         "byte",
     };
 
@@ -370,6 +373,8 @@ G4_SubReg_Align Get_G4_SubRegAlign_From_Size( uint16_t size )
         return Eight_Word;
     case 32:
         return Sixteen_Word;
+    case 64:
+        return ThirtyTwo_Word;
     default:
         return GRFALIGN;
     }
@@ -1467,18 +1472,21 @@ int Get_PreDefined_Surf_Index(int index)
 
 const char* createStringCopy(const char* name, vISA::Mem_Manager &m_mem)
 {
-    if (strlen(name) == 0)
-    {
+    if (*name == '\0') {
         return "";
     }
-    size_t size = strlen(name) + 1;
-    if (size > 255)
+
+    // TODO: look into relaxing this
+    static const size_t MAX_VISA_BINARY_STRING_LENGTH = 256;
+
+    size_t copyLen = strlen(name);
+    if (copyLen >= MAX_VISA_BINARY_STRING_LENGTH)
     {
-        size = 255;
+        copyLen = MAX_VISA_BINARY_STRING_LENGTH - 1;
     }
-    char* str = (char*) m_mem.alloc(size);
-    strncpy_s(str, size, name, size);
-    return str;
+    char* copy = (char*)m_mem.alloc(copyLen + 1);
+    strncpy_s(copy, copyLen + 1, name, copyLen);
+    return copy;
 }
 
 std::string sanitizeLabelString(std::string str)

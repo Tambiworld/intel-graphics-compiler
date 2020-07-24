@@ -300,7 +300,7 @@ G4_INST* IR_Builder::createInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -345,7 +345,7 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno, curFile));
+        ii->setLocation(allocateMDLocation(lineno, curFile));
     }
 
     return ii;
@@ -364,8 +364,7 @@ G4_INST* IR_Builder::createSync(G4_opcode syncOp, G4_Operand* src)
 }
 
 G4_INST* IR_Builder::createMov(uint8_t execSize, G4_DstRegRegion* dst,
-    G4_Operand* src0, uint32_t option, bool appendToInstList,
-    int lineno, int CISAoff, const char* srcFilename)
+    G4_Operand* src0, uint32_t option, bool appendToInstList)
 {
     G4_INST* newInst = nullptr;
     if (appendToInstList)
@@ -376,9 +375,6 @@ G4_INST* IR_Builder::createMov(uint8_t execSize, G4_DstRegRegion* dst,
     {
         newInst = createInternalInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
     }
-    newInst->setLineNo(lineno);
-    newInst->setCISAOff(CISAoff);
-    newInst->setSrcFilename(srcFilename);
     return newInst;
 }
 
@@ -393,6 +389,33 @@ G4_INST* IR_Builder::createBinOp(G4_opcode op, uint8_t execSize, G4_DstRegRegion
     {
         return createInternalInst(nullptr, op, nullptr, false, execSize, dst, src0, src1, option);
     }
+}
+
+// mach creates both implicit acc and src using the supplied accType. AccWrCtrl is turned on.
+// acc0.0 is always used
+G4_INST* IR_Builder::createMach(uint8_t execSize, G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType)
+{
+    auto machInst = createInternalInst(nullptr, G4_mach, nullptr, false, execSize, dst, src0, src1, option);
+    const RegionDesc* rd = execSize > 1 ? getRegionStride1() : getRegionScalar();
+    auto accSrc = createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getAcc0Reg(), 0, 0, rd, accType);
+    machInst->setImplAccSrc(accSrc);
+    auto accDSt = createDst(phyregpool.getAcc0Reg(), 0, 0, 1, accType);
+    machInst->setImplAccDst(accDSt);
+    machInst->setOptionOn(InstOpt_AccWrCtrl);
+    return machInst;
+}
+
+// macl creates an implicit src using the supplied the accType. AccWrCtrl is not set.
+// acc0.0 is always used
+G4_INST* IR_Builder::createMacl(uint8_t execSize, G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType)
+{
+    auto maclInst = createInternalInst(nullptr, G4_mach, nullptr, false, execSize, dst, src0, src1, option);
+    const RegionDesc* rd = execSize > 1 ? getRegionStride1() : getRegionScalar();
+    auto accSrc = createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getAcc0Reg(), 0, 0, rd, accType);
+    maclInst->setImplAccSrc(accSrc);
+    return maclInst;
 }
 
 G4_INST* IR_Builder::createIf(G4_Predicate* prd, uint8_t size, uint32_t option)
@@ -458,7 +481,7 @@ G4_INST* IR_Builder::createInternalCFInst(
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno, srcFilename));
     }
 
     return ii;
@@ -485,7 +508,7 @@ G4_INST* IR_Builder::createCFInst(
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(ii);
     }
@@ -536,7 +559,7 @@ G4_INST* IR_Builder::createInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -581,7 +604,7 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -608,7 +631,7 @@ G4_InstSend* IR_Builder::createSendInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            m->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            m->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(m);
@@ -638,7 +661,7 @@ G4_InstSend* IR_Builder::createInternalSendInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -681,7 +704,7 @@ G4_InstSend* IR_Builder::createSplitSendInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            m->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            m->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(m);
     }
@@ -712,7 +735,7 @@ G4_InstSend* IR_Builder::createInternalSplitSendInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -743,7 +766,7 @@ G4_INST* IR_Builder::createMathInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(i);
     }
@@ -771,7 +794,7 @@ G4_INST* IR_Builder::createInternalMathInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -798,7 +821,7 @@ G4_INST* IR_Builder::createIntrinsicInst(
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -821,7 +844,7 @@ G4_INST* IR_Builder::createInternalIntrinsicInst(G4_Predicate* prd, Intrinsic in
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;

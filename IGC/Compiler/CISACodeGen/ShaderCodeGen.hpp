@@ -188,15 +188,13 @@ public:
     CVariable* GetDBG();
     CVariable* GetHWTID();
     CVariable* GetSP();
+    CVariable* GetFP();
     CVariable* GetARGV();
     CVariable* GetRETV();
     CVariable* CreateSP();
-    /// init stack-pointer at the beginning of the kernel
-    void InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize);
-    /// save the stack-pointer when entering a stack-call function
-    void SaveSP();
-    /// restore the stack-pointer when exiting a stack-call function
-    void RestoreSP();
+    CVariable* GetPrivateBase();
+    void SaveStackState();
+    void RestoreStackState();
     /// Get the max private mem size based on simd width
     uint32_t GetMaxPrivateMem();
 
@@ -205,7 +203,6 @@ public:
     CVariable* ImmToVariable(uint64_t immediate, VISA_Type type);
     CVariable* GetConstant(llvm::Constant* C, CVariable* dstVar = nullptr);
     CVariable* GetScalarConstant(llvm::Value* c);
-    CVariable* GetStructVariable(llvm::Value* v, llvm::Constant* initValue = nullptr);
     CVariable* GetUndef(VISA_Type type);
     llvm::Constant* findCommonConstant(llvm::Constant* C, uint elts, uint currentEmitElts, bool& allSame);
     virtual unsigned int GetGlobalMappingValue(llvm::Value* c);
@@ -470,6 +467,8 @@ public:
 
     e_alignment getGRFAlignment() const { return CVariable::getAlignment(getGRFSize()); }
 
+protected:
+    void GetPrintfStrings(std::vector<std::pair<unsigned int, std::string>>& printfStrings);
 private:
     // Return DefInst's CVariable if it could be reused for UseInst, and return
     // nullptr otherwise.
@@ -531,7 +530,8 @@ protected:
     CVariable* m_DBG;
     CVariable* m_HW_TID;
     CVariable* m_SP;
-    CVariable* m_SavedSP;
+    CVariable* m_FP;
+    CVariable* m_SavedFP;
     CVariable* m_ARGV;
     CVariable* m_RETV;
 

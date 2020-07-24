@@ -120,8 +120,6 @@ G4_DstRegRegion* HWConformity::insertMovAfter(INST_LIST_ITER& it, G4_DstRegRegio
             type);
     }
 
-    INST_LIST_ITER iter = it;
-    iter++;
     unsigned char exec_size = inst->getExecSize();
     G4_Type execType = inst->isRawMov() ? dst->getType() : inst->getExecType();
     bool scalarSrc = true;
@@ -193,7 +191,7 @@ G4_DstRegRegion* HWConformity::insertMovAfter(INST_LIST_ITER& it, G4_DstRegRegio
     G4_INST* newInst = builder.createMov(exec_size, dst, srcRegion, new_option, false);
     newInst->setPredicate(pred);
     newInst->setSaturate(inst->getSaturate());
-    bb->insert(iter, newInst);
+    bb->insertAfter(it, newInst);
 
     // update propagation info
     maintainDU4TempMov(inst, newInst);
@@ -252,7 +250,7 @@ void HWConformity::broadcast(
         type);
     G4_INST* newInst = builder.createMov(execSize, dst, src, instMask, false);
 
-    bb->insert(it, newInst);
+    bb->insertBefore(it, newInst);
 
     const RegionDesc* srcRegion = builder.getRegionStride1();
     G4_SrcRegRegion* newSrc = builder.Create_Src_Opnd_From_Dcl(dcl, srcRegion);
@@ -289,7 +287,7 @@ G4_SrcRegRegion* HWConformity::insertCopyBefore(INST_LIST_ITER it, uint32_t srcN
 
     G4_INST* movInst = builder.createMov(newExecSize, dst, origSrc, InstOpt_WriteEnable, false);
 
-    bb->insert(it, movInst);
+    bb->insertBefore(it, movInst);
     G4_SrcRegRegion* newSrc = builder.createSrcRegRegion(modifier, Direct, dcl->getRegVar(),
         0, 0, newExecSize == 1 ? builder.getRegionScalar() : builder.getRegionStride1(),
         dcl->getElemType());
@@ -326,7 +324,7 @@ G4_SrcRegRegion* HWConformity::insertCopyAtBBEntry(G4_BB* bb, uint8_t execSize, 
     {
         if (!(*it)->isLabel())
         {
-            bb->insert(it, movInst);
+            bb->insertBefore(it, movInst);
             break;
         }
     }
@@ -408,7 +406,7 @@ G4_Operand* HWConformity::insertMovBefore(
     G4_Declare* dcl = builder.createTempVar(newExecSize == 1 ? 1 : newExecSize * scale, type, subAlign);
     G4_DstRegRegion* dstRegion = builder.Create_Dst_Opnd_From_Dcl(dcl, scale);
     G4_INST* newInst = builder.createMov(newExecSize, dstRegion, builder.duplicateOperand(src), newInstEMask, false);
-    bb->insert(it, newInst);
+    bb->insertBefore(it, newInst);
     inst->transferDef(newInst, Gen4_Operand_Number(srcNum + 1), Opnd_src0);
     newInst->addDefUse(inst, Gen4_Operand_Number(srcNum + 1));
 
@@ -948,7 +946,7 @@ bool HWConformity::fixLine(INST_LIST_ITER it, G4_BB* bb)
             G4_INST* newInst = builder.createMov(mov_size, new_dst_opnd, src0, InstOpt_NoOpt, false);
             newInst->setNoMask(true);
 
-            bb->insert(it, newInst);
+            bb->insertBefore(it, newInst);
             inst->setSrc(new_src0_opnd, 0);
             return true;
         }
@@ -1553,9 +1551,8 @@ bool HWConformity::fixDstAlignment(INST_LIST_ITER i, G4_BB* bb, G4_Type extype, 
         if (exec_size >= scale)
         {
             G4_Type new_type = (scale == 2) ? Type_UW : Type_UD;
-            dst->setHorzStride(1);
-            dst->setSubRegOff((short)(dst->getSubRegOff() / scale));
-            dst->setType(new_type);
+            auto newDst = builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff() / scale, 1, new_type, dst->getAccRegSel());
+            inst->setDest(newDst);
             inst->setSrc(builder.createImm(new_value, new_type), 0);
             inst->setExecSize((unsigned char)(exec_size / scale));
             return insertMOV;
@@ -1996,19 +1993,16 @@ void HWConformity::doGenerateMacl(INST_LIST_ITER it, G4_BB* bb)
         mulInst->setCondMod(nullptr);
     }
 
-    // create a mach inst
-    G4_INST* machInst = builder.createBinOp(G4_mach, mulInst->getExecSize(),
-        origDst, builder.duplicateOperand(src0), builder.duplicateOperand(src1), origOptions, false);
+    // create a macl inst
+    G4_INST* machInst = builder.createMacl(mulInst->getExecSize(),
+        origDst, builder.duplicateOperand(src0), builder.duplicateOperand(src1), origOptions, accType);
     machInst->setPredicate(predicate);
 
     // maintain du chain as fixAccDst uses it later
-    G4_SrcRegRegion* accSrcOpnd = builder.createSrcRegRegion(Mod_src_undef, Direct,
-        builder.phyregpool.getAcc0Reg(), 0, 0, builder.getRegionStride1(), accType);
-    machInst->setImplAccSrc(accSrcOpnd);
     mulInst->addDefUse(machInst, Opnd_implAccSrc);
 
     INST_LIST_ITER machIter = it;
-    machIter = bb->insert(++machIter, machInst);
+    machIter = bb->insertBefore(++machIter, machInst);
 
     if (!IS_DTYPE(origDst->getType()) || origDst->getHorzStride() != 1 ||
         !builder.isOpndAligned(origDst, 32))
@@ -2188,15 +2182,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
     G4_CondMod* condmod = builder.duplicateOperand(inst->getCondMod());
     G4_Predicate* pred = builder.duplicateOperand(inst->getPredicate());
 
-    // check if the following inst is mulh and uses the same srcs as this mul.
-    // if true, translate them into
-    // mul acc src0 src1
-    // mach dst_mulh src0 src1
-    // mov mul_dst src0 src1
-    INST_LIST_ITER next_i = i;
-    next_i++;
     G4_Type tmp_type = (IS_UNSIGNED_INT(src0->getType()) && IS_UNSIGNED_INT(src1->getType())) ? Type_UD : Type_D;
-    bool isCompressed = isCompressedInst(inst);
 
     if (src1->isSrcRegRegion())
     {
@@ -2212,115 +2198,17 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
     bool sat_mod = inst->getSaturate();
     inst->setSaturate(false);
 
-    // see if we can combine this mul with a mulh following it
-    if (next_i != bb->end())
-    {
-        G4_INST* next_inst = *next_i;
-
-        if (next_inst->opcode() == G4_mulh &&
-            next_inst->getExecSize() == exec_size &&
-            inst->getPredicate() == next_inst->getPredicate() &&
-            ((srcExchanged &&
-                src0->getType() == next_inst->getSrc(1)->getType() &&
-                src0->compareOperand(next_inst->getSrc(1)) == Rel_eq &&
-                src1->getType() == next_inst->getSrc(0)->getType() &&
-                src1->compareOperand(next_inst->getSrc(0)) == Rel_eq) ||
-                (!srcExchanged &&
-                    src0->getType() == next_inst->getSrc(0)->getType() &&
-                    src0->compareOperand(next_inst->getSrc(0)) == Rel_eq &&
-                    src1->getType() == next_inst->getSrc(1)->getType() &&
-                    src1->compareOperand(next_inst->getSrc(1)) == Rel_eq)))
-        {
-            // change current mul inst
-            G4_DstRegRegion* acc_dst_opnd = builder.createDst(
-                builder.phyregpool.getAcc0Reg(),
-                0,
-                0,
-                1,
-                tmp_type);
-
-            inst->setDest(acc_dst_opnd);
-
-            fixMulSrc1(i, bb);
-
-            inst->transferUse(next_inst, true);
-            inst->addDefUse(next_inst, Opnd_implAccSrc);
-            // change mulh inst
-            next_inst->setOpcode(G4_mach);
-
-            G4_DstRegRegion* next_dst = next_inst->getDst();
-            if (next_dst != NULL &&
-                (next_inst->getSaturate() ||
-                    next_dst->getByteOffset() % GENX_GRF_REG_SIZ != 0 ||
-                    (!bb->isAllLaneActive() && next_inst->isWriteEnableInst() == false) ||
-                    (next_dst &&
-                    ((next_dst->getExecTypeSize() > G4_Type_Table[Type_D].byteSize) ||
-                        isPreAssignedRegOffsetNonZero<G4_DstRegRegion>(next_dst)))))
-            {
-                // add a tmp mov
-                G4_DstRegRegion* new_next_dst = insertMovAfter(next_i, next_dst, next_dst->getType(), bb);
-                next_inst->setDest(new_next_dst);
-            }
-
-            // set implicit source/dst for MACH
-            const RegionDesc* rd = exec_size == 1 ? builder.getRegionScalar() : builder.getRegionStride1();
-            G4_SrcRegRegion* acc_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getAcc0Reg(), 0, 0, rd, tmp_type);
-            next_inst->setImplAccSrc(acc_src_opnd);
-            next_inst->setImplAccDst(builder.createDstRegRegion(*acc_dst_opnd));
-
-            // create mov inst
-            G4_SrcRegRegion* movAccSrc = builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getAcc0Reg(), 0, 0, rd, tmp_type);
-            G4_INST* newMov = builder.createMov(exec_size, dst, movAccSrc, inst_opt, false);
-            newMov->setPredicate(pred);
-            newMov->setCondMod(condmod);
-
-            INST_LIST_ITER iter = next_i;
-            iter++;
-            bb->insert(iter, newMov);
-
-            next_inst->addDefUse(newMov, Opnd_src0);
-
-            INST_LIST_ITER last_iter = iter;
-            last_iter--;
-
-            if (dst != NULL &&
-                (sat_mod ||
-                (dst &&
-                    ((dst->getExecTypeSize() > G4_Type_Table[Type_D].byteSize) ||
-                    (isPreAssignedRegOffsetNonZero<G4_DstRegRegion>(dst))))))
-            {
-                // add a tmp mov
-                iter--;
-                G4_DstRegRegion* new_next_dst = insertMovAfter(iter, dst, dst->getType(), bb);
-                newMov->setDest(new_next_dst);
-                if (new_next_dst != dst && sat_mod)
-                {
-                    MUST_BE_TRUE(iter != bb->end() && (*iter)->opcode() == G4_mov,
-                        "Next instruciton should be the MOV generated for consistent Dst and ACC source region.");
-                    (*iter)->setSaturate(false);
-                }
-            }
-
-            next_inst->setOptionOn(InstOpt_AccWrCtrl);
-
-            if (exec_size > builder.getNativeExecSize())
-            {
-                splitDWMULInst(i, last_iter, bb);
-            }
-            return true;
-        }
-    }
-
     G4_DstRegRegion* acc_dst_opnd = builder.createDst(builder.phyregpool.getAcc0Reg(), 0, 0, 1, tmp_type);
     inst->setDest(acc_dst_opnd);
     fixMulSrc1(i, bb);
 
     inst->setNoMask(true);
 
-    if (pred != NULL) {
+    if (pred)
+    {
         // conditional modifier cannot be used
         // when the MUL source operand is of dword type.
-        inst->setCondMod(NULL);
+        inst->setCondMod(nullptr);
     }
 
     // Dst is either null, or a temp D if the original dst is Q/UQ
@@ -2337,40 +2225,24 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
     }
 
     // create a mach inst
-    G4_INST* newInst = builder.createBinOp(G4_mach, exec_size, machDst,
-        builder.duplicateOperand(src0), builder.duplicateOperand(src1), inst_opt, false);
-
-    newInst->setOptionOn(InstOpt_AccWrCtrl);
+    G4_INST* newInst = builder.createMach(exec_size, machDst,
+        builder.duplicateOperand(src0), builder.duplicateOperand(src1), inst_opt, tmp_type);
 
     INST_LIST_ITER iter = i;
     iter++;
-    bb->insert(iter, newInst);
+    bb->insertBefore(iter, newInst);
 
-    inst->setPredicate(NULL);
+    inst->setPredicate(nullptr);
 
     inst->copyDef(newInst, Opnd_src0, Opnd_src0);
     inst->copyDef(newInst, Opnd_src1, Opnd_src1);
     inst->transferUse(newInst);
     inst->addDefUse(newInst, Opnd_implAccSrc);
 
-    // create an implicit source for MACH
-    const RegionDesc* rd = NULL;
-    unsigned short vs = 0, wd = exec_size, hs = 0;
-    if (exec_size > 1) {
-        if (isCompressed) {
-            wd = wd / 2;
-        }
-        hs = 1;
-        vs = wd;
-    }
-    rd = builder.createRegionDesc(vs, wd, hs);
+    // create an explciit acc source for later use
+    const RegionDesc* rd = exec_size > 1 ? builder.getRegionStride1() : builder.getRegionScalar();
     G4_SrcRegRegion* acc_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct,
         builder.phyregpool.getAcc0Reg(), 0, 0, rd, tmp_type);
-
-    newInst->setImplAccSrc(acc_src_opnd);
-
-    // set an implicit dst for MACH
-    newInst->setImplAccDst(builder.createDstRegRegion(*acc_dst_opnd));
 
     insertedInst = true;
 
@@ -2389,7 +2261,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
         G4_INST* movInst = builder.createMov(exec_size,
             builder.Create_Dst_Opnd_From_Dcl(low32BitDcl, 1),
             builder.createSrcRegRegion(*acc_src_opnd), inst_opt, false);
-        bb->insert(iter, movInst);
+        bb->insertBefore(iter, movInst);
 
         G4_DstRegRegion* origDst = dst;
         bool needsExtraMov = origDst->getHorzStride() > 1 || condmod != NULL || sat_mod;
@@ -2406,7 +2278,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
             inst_opt, false);
         lowMove->setPredicate(pred);
 
-        bb->insert(iter, lowMove);
+        bb->insertBefore(iter, lowMove);
 
         MUST_BE_TRUE(high32BitDcl != NULL, "mach dst must not be null");
         G4_INST* highMove = builder.createMov(exec_size,
@@ -2414,7 +2286,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
             builder.Create_Src_Opnd_From_Dcl(high32BitDcl, builder.getRegionStride1()),
             inst_opt, false);
         highMove->setPredicate(pred);
-        bb->insert(iter, highMove);
+        bb->insertBefore(iter, highMove);
 
         if (needsExtraMov)
         {
@@ -2425,7 +2297,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
                 inst_opt, false);
             moveInst->setCondMod(condmod);
             moveInst->setSaturate(sat_mod);
-            bb->insert(iter, moveInst);
+            bb->insertBefore(iter, moveInst);
         }
 
         return true;
@@ -2447,7 +2319,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
         newInst->transferUse(movInst);
         newInst->addDefUse(movInst, Opnd_src0);
 
-        bb->insert(iter, movInst);
+        bb->insertBefore(iter, movInst);
         last_iter = iter;
         last_iter--;
         if (extra_mov)
@@ -2476,7 +2348,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
         G4_INST* movInst = builder.createMov(exec_size, tmp_dst_opnd,
             builder.createSrcRegRegion(*acc_src_opnd), InstOpt_NoOpt, false);
         movInst->setCondMod(condmod);
-        bb->insert(iter, movInst);
+        bb->insertBefore(iter, movInst);
 
         last_iter = iter;
         last_iter--;
@@ -2489,7 +2361,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
         newInst->transferUse(newInst2);
         newInst->addDefUse(movInst, Opnd_src0);
         movInst->addDefUse(newInst2, Opnd_src0);
-        bb->insert(iter, newInst2);
+        bb->insertBefore(iter, newInst2);
         iter++;
     }
 
@@ -2582,7 +2454,7 @@ void HWConformity::fixMULHInst(INST_LIST_ITER& i, G4_BB* bb)
         G4_INST* tmpMov = builder.createMov(exec_size, dst, tmpSrc, inst->getOption(), false);
         tmpMov->setPredicate(builder.duplicateOperand(inst->getPredicate()));
 
-        bb->insert(iter, tmpMov);
+        bb->insertBefore(iter, tmpMov);
         //it will decrement back to mov
         i = iter;
 
@@ -2624,55 +2496,49 @@ void HWConformity::fixMULHInst(INST_LIST_ITER& i, G4_BB* bb)
     G4_INST* newMul = builder.createBinOp(G4_mul, exec_size,
         acc_dst_opnd, builder.duplicateOperand(src0), builder.duplicateOperand(src1), inst_opt, false);
 
-    bb->insert(iter, newMul);
+    bb->insertBefore(iter, newMul);
     inst->copyDefsTo(newMul, false);
-    newMul->addDefUse(inst, Opnd_implAccSrc);
 
-    iter = i;
-    iter--;
-    fixMulSrc1(iter, bb);
 
+    fixMulSrc1(std::prev(i), bb);
     newMul->setNoMask(true);
 
-    inst->setOpcode(G4_mach);
-
+    auto machSrc1 = inst->getSrc(1);
     if (src1->isImm() && src0->getType() != src1->getType())
     {
         G4_Imm* oldImm = src1->asImm();
         // Ensure src1 has the same type as src0.
-        G4_Imm* newImm = builder.createImm(oldImm->getInt(), src0->getType());
-        inst->setSrc(newImm, 1);
+        machSrc1 = builder.createImm(oldImm->getInt(), src0->getType());
     }
     else if (!IS_DTYPE(src1->getType()))
     {
         // this can happen due to vISA opt, convert them to src0 type which should be D/UD
         // We use D as the tmp type to make sure we can represent all src1 values
-        auto isSrc1NonScalar = inst->getSrc(1)->isSrcRegRegion() && !inst->getSrc(1)->asSrcRegRegion()->isScalar();
-        auto newSrc = insertMovBefore(i, 1, Type_D, bb);
-        inst->setSrc(builder.createSrcRegRegion(Mod_src_undef, Direct, newSrc->getTopDcl()->getRegVar(), 0, 0,
-            isSrc1NonScalar ? builder.getRegionStride1() : builder.getRegionScalar(), src0->getType()), 1);
+        machSrc1 = insertMovBefore(i, 1, Type_D, bb);
     }
 
-    //set implicit src/dst for mach
-    const RegionDesc* rd = exec_size > 1 ? builder.getRegionStride1() : builder.getRegionScalar();
-    G4_SrcRegRegion* acc_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getAcc0Reg(), 0, 0, rd, tmp_type);
-    inst->setImplAccSrc(acc_src_opnd);
-    inst->setImplAccDst(builder.createDstRegRegion(*acc_dst_opnd));
+    // We don't duplicate the operands here as original inst is unlinked
+    // ToDo: this invalidate du-chain, do we still need to maintain it?
+    auto machInst = builder.createMach(inst->getExecSize(), inst->getDst(), inst->getSrc(0), machSrc1, inst_opt, tmp_type);
+    machInst->setPredicate(inst->getPredicate());
+    machInst->setCondMod(inst->getCondMod());
+    *i = machInst;
+    inst->transferUse(machInst);
+    inst->removeAllDefs();
+    newMul->addDefUse(machInst, Opnd_implAccSrc);
 
     INST_LIST_ITER end_iter = i;
     // check if the ACC source is aligned to mach dst
+    // ToDo: this should be checked by fixAcc?
     G4_DstRegRegion* dst = inst->getDst();
-    if ((inst->getSaturate()) ||
-        (dst &&
-        ((dst->getExecTypeSize() > G4_Type_Table[Type_D].byteSize) ||
-            (isPreAssignedRegOffsetNonZero<G4_DstRegRegion>(dst)))))
+    if (inst->getSaturate() ||
+        dst->getExecTypeSize() > G4_Type_Table[Type_D].byteSize ||
+        isPreAssignedRegOffsetNonZero<G4_DstRegRegion>(dst))
     {
         // add a tmp mov
-        inst->setDest(insertMovAfter(i, dst, dst->getType(), bb));
+        machInst->setDest(insertMovAfter(i, dst, dst->getType(), bb));
         end_iter++;
     }
-
-    inst->setOptionOn(InstOpt_AccWrCtrl);
 
     if (exec_size > builder.getNativeExecSize())
     {
@@ -2730,7 +2596,7 @@ void HWConformity::copyDwords(G4_Declare* dst,
 
     G4_INST* movInst = builder.createMov((uint8_t)numDwords, dstOpnd, srcOpnd, InstOpt_WriteEnable, false);
 
-    INST_LIST_ITER movPos = bb->insert(iter, movInst);
+    INST_LIST_ITER movPos = bb->insertBefore(iter, movInst);
 
     if (numDwords == NUM_DWORDS_PER_GRF * 2 &&
         ((dstOffset % GENX_GRF_REG_SIZ) != 0 || (srcOffset % GENX_GRF_REG_SIZ) != 0))
@@ -2787,7 +2653,7 @@ void HWConformity::copyDwordsIndirect(G4_Declare* dst,
 
     G4_INST* movInst = builder.createMov((uint8_t)numDwords, dstOpnd, newSrc, InstOpt_WriteEnable, false);
 
-    bb->insert(iter, movInst);
+    bb->insertBefore(iter, movInst);
 }
 
 // copy numRegs GRFs from src[srcOffset] to dst[dstOffset]
@@ -2888,7 +2754,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                 newSrc->setImmAddrOff(src0RR->getAddrImm());
                 auto newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
                 newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                iter = bb->insert(origIter, newInst);
+                iter = bb->insertBefore(origIter, newInst);
 
                 // second half
                 bool dstAddrIncremented = false, src0AddrIncremented = false;
@@ -2898,7 +2764,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                     // increment dst address register by 4, later decrement it
                     dstAddrIncremented = true;
                     immAddrOff = 0;
-                    iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
+                    iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
                 }
                 newDst = dst->isIndirect() ? (builder.createIndirectDst(dst->getBase(), dst->getSubRegOff(), 2 * dstHS, Type_UD, immAddrOff + dst->getAddrImm())) :
                     (builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff() * 2 + 1, 2 * dstHS, Type_UD));
@@ -2910,7 +2776,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                     if ((4 + src0RR->getAddrImm()) > 512)
                     {
                         src0AddrIncremented = true;
-                        iter = bb->insert(origIter, incrementVar(src0RR, src0RR->getRegion()->width, src0RR->getRegOff(), src0RR->getSubRegOff(), inst, 4));
+                        iter = bb->insertBefore(origIter, incrementVar(src0RR, src0RR->getRegion()->width, src0RR->getRegOff(), src0RR->getSubRegOff(), inst, 4));
                         newSrc->setImmAddrOff(src0RR->getAddrImm());
                     }
                     else
@@ -2918,16 +2784,16 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                 }
                 newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
                 newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                iter = bb->insert(origIter, newInst);
+                iter = bb->insertBefore(origIter, newInst);
 
                 if (dstAddrIncremented)
                 {
-                    iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
+                    iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
                 }
 
                 if (src0AddrIncremented)
                 {
-                    iter = bb->insert(origIter, incrementVar(src0RR, src0RR->getRegion()->width, src0RR->getRegOff(), src0RR->getSubRegOff(), inst, -4));
+                    iter = bb->insertBefore(origIter, incrementVar(src0RR, src0RR->getRegion()->width, src0RR->getRegOff(), src0RR->getSubRegOff(), inst, -4));
                 }
 
                 bb->erase(origIter);
@@ -2949,7 +2815,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                     auto newSrc = builder.createSrcRegRegion(*src0RR);
                     auto newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
                     newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                    iter = bb->insert(origIter, newInst);
+                    iter = bb->insertBefore(origIter, newInst);
 
                     bool dstAddrIncremented = false;
                     unsigned int immAddrOff = 4;
@@ -2958,7 +2824,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                         // increment dst address register by 4, later decrement it
                         dstAddrIncremented = true;
                         immAddrOff = 0;
-                        iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
+                        iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
                     }
 
                     newDst = dst->isIndirect() ? (builder.createIndirectDst(dst->getBase(), dst->getSubRegOff(), 2 * dstHS, Type_D, immAddrOff + dst->getAddrImm())) :
@@ -2975,11 +2841,11 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                     auto imm31 = builder.createImm(31, Type_W);
                     newInst = builder.createBinOp(G4_asr, inst->getExecSize(), newDst, newSrc, imm31, inst->getOption(), false);
                     newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                    iter = bb->insert(origIter, newInst);
+                    iter = bb->insertBefore(origIter, newInst);
 
                     if (dstAddrIncremented)
                     {
-                        iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
+                        iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
                     }
 
                     bb->erase(origIter);
@@ -2999,7 +2865,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                     auto newSrc = builder.createSrcRegRegion(*src0RR);
                     auto newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
                     newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                    iter = bb->insert(origIter, newInst);
+                    iter = bb->insertBefore(origIter, newInst);
 
                     bool dstAddrIncremented = false;
                     unsigned int immAddrOff = 4;
@@ -3008,18 +2874,18 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
                         // increment dst address register by 4, later decrement it
                         dstAddrIncremented = true;
                         immAddrOff = 0;
-                        iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
+                        iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
                     }
                     newDst = dst->isIndirect() ? (builder.createIndirectDst(dst->getBase(), dst->getSubRegOff(), 2 * dstHS, Type_UD, immAddrOff + dst->getAddrImm())) :
                         (builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff() * 2 + 1, 2 * dstHS, Type_UD));
                     auto imm0 = builder.createImm(0);
                     newInst = builder.createMov(inst->getExecSize(), newDst, imm0, inst->getOption(), false);
                     newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-                    iter = bb->insert(origIter, newInst);
+                    iter = bb->insertBefore(origIter, newInst);
 
                     if (dstAddrIncremented)
                     {
-                        iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
+                        iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
                     }
 
                     bb->erase(origIter);
@@ -3047,7 +2913,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
             newSrc->setImmAddrOff(src0RR->getAddrImm());
             auto newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
             newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-            iter = bb->insert(origIter, newInst);
+            iter = bb->insertBefore(origIter, newInst);
 
             bb->erase(origIter);
 
@@ -3066,7 +2932,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
         auto immLowSrc = builder.createImm(low, Type_D);
         auto newInst = builder.createMov(inst->getExecSize(), newDst, immLowSrc, inst->getOption(), false);
         newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-        iter = bb->insert(origIter, newInst);
+        iter = bb->insertBefore(origIter, newInst);
 
         // high
         bool dstAddrIncremented = false;
@@ -3076,18 +2942,18 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
             // increment dst address register by 4, later decrement it
             dstAddrIncremented = true;
             immAddrOff = 0;
-            iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
+            iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, 4));
         }
         newDst = dst->isIndirect() ? (builder.createIndirectDst(dst->getBase(), dst->getSubRegOff(), 2 * dstHS, Type_D, immAddrOff + dst->getAddrImm())) :
             (builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff() * 2 + 1, 2 * dstHS, Type_D));
         auto immHigh = builder.createImm(high, Type_D);
         newInst = builder.createMov(inst->getExecSize(), newDst, immHigh, inst->getOption(), false);
         newInst->setPredicate(inst->getPredicate() ? builder.createPredicate(*inst->getPredicate()) : nullptr);
-        iter = bb->insert(origIter, newInst);
+        iter = bb->insertBefore(origIter, newInst);
 
         if (dstAddrIncremented)
         {
-            iter = bb->insert(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
+            iter = bb->insertBefore(origIter, incrementVar(dst, inst->getExecSize(), dst->getRegOff(), dst->getSubRegOff(), inst, -4));
         }
 
         bb->erase(origIter);
@@ -3252,7 +3118,7 @@ bool HWConformity::fix64bInst(INST_LIST_ITER iter, G4_BB* bb)
                         tmpType, GRFALIGN);
                     G4_DstRegRegion* tmpDst = builder.Create_Dst_Opnd_From_Dcl(tmp, multFactor);
                     G4_INST* movInst = builder.createMov(inst->getExecSize(), tmpDst, src, inst->getOption(), false);
-                    bb->insert(iter, movInst);
+                    bb->insertBefore(iter, movInst);
                     uint16_t width = exSize;
                     if (width * 8 > GENX_GRF_REG_SIZ)
                     {
@@ -3558,7 +3424,7 @@ void HWConformity::splitDWMULInst(INST_LIST_ITER& start, INST_LIST_ITER& end, G4
         G4_INST* expand_sec_half_op = *curr_iter;
         iter++;
 
-        bb->insert(last_iter, expand_sec_half_op);
+        bb->insertBefore(last_iter, expand_sec_half_op);
         if (curr_iter == start)
         {
             start--;
@@ -3570,7 +3436,7 @@ void HWConformity::splitDWMULInst(INST_LIST_ITER& start, INST_LIST_ITER& end, G4
     {
         evenlySplitInst(iter, bb);
         G4_INST* expand_sec_half_op = *iter;
-        bb->insert(last_iter, expand_sec_half_op);
+        bb->insertBefore(last_iter, expand_sec_half_op);
         end--;
         bb->erase(iter);
     }
@@ -4444,7 +4310,7 @@ void HWConformity::fixMADInst(G4_BB* bb)
                         if (movDist > 0)
                         {
                             mov_iter++;
-                            bb->insert(mov_iter, inst);
+                            bb->insertBefore(mov_iter, inst);
                             INST_LIST_ITER tmpIter = i;
                             i--;
                             bb->erase(tmpIter);
@@ -4483,337 +4349,6 @@ void HWConformity::fixMADInst(G4_BB* bb)
     }
 }
 
-struct AccInterval
-{
-    G4_INST* inst;
-    int lastUse;
-    bool mustBeAcc0 = false;
-    bool isPreAssigned = false;
-    int assignedAcc = -1;
-    int bundleConflictTimes = 0;
-    int bankConflictTimes = 0;
-    int suppressionTimes = 0;
-
-    AccInterval(G4_INST* inst_, int lastUse_, bool preAssigned = false) :
-        inst(inst_), lastUse(lastUse_), isPreAssigned(preAssigned)
-    {
-        if (isPreAssigned)
-        {
-            mustBeAcc0 = true;
-            assignedAcc = 0;
-        }
-    }
-
-    double getSpillCost()
-    {
-        if (isPreAssigned)
-        {
-            // don't spill pre-assigned
-            return (double)1000000;
-        }
-        int dist = lastUse - inst->getLocalId();
-
-        return std::pow((double)inst->use_size(), 3) / dist;
-    }
-
-    // see if this interval needs both halves of the acc
-    bool needBothAcc(IR_Builder& builder) const
-    {
-        switch (inst->getDst()->getType())
-        {
-        case Type_F:
-            return inst->getExecSize() == (builder.getNativeExecSize() * 2);
-        case Type_HF:
-            return false;
-        case Type_DF:
-            return inst->getExecSize() > (builder.getNativeExecSize() / 2);
-        default:
-            return true;
-        }
-    }
-
-    void dump()
-    {
-        std::cerr << "Interval: [" << inst->getLocalId() << ", " << lastUse << "]\n";
-        std::cerr << "\t";
-        inst->dump();
-        if (assignedAcc != -1)
-        {
-            std::cerr << "\tAssigned to Acc" << assignedAcc << "\n";
-        }
-        std::cerr << "\n";
-    }
-};
-
-
-// returns true if the inst is a candidate for acc substitution
-// lastUse is also update to point to the last use id of the inst
-static bool isAccCandidate(G4_INST* inst, G4_Kernel& kernel, int& lastUse, bool& mustBeAcc0)
-
-{
-    mustBeAcc0 = false;
-    G4_DstRegRegion* dst = inst->getDst();
-    if (!dst || kernel.fg.globalOpndHT.isOpndGlobal(dst) || !inst->canDstBeAcc())
-    {
-        return false;
-    }
-
-    // check that every use may be replaced with acc
-    int lastUseId = 0;
-    std::vector<G4_INST*> madSrc0Use;
-    std::vector<G4_INST*> threeSrcUses; //3src inst that use this dst
-    for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
-    {
-        auto&& use = *I;
-        G4_INST* useInst = use.first;
-        Gen4_Operand_Number opndNum = use.second;
-        lastUseId = std::max(lastUseId, useInst->getLocalId());
-        // acc may be src0 of two-source inst or src1 of three-source inst
-        // ToDo: may swap source here
-        if (useInst->getNumSrc() == 3)
-        {
-
-            if (!kernel.fg.builder->relaxedACCRestrictions() &&
-                std::find(threeSrcUses.begin(), threeSrcUses.end(), useInst) != threeSrcUses.end())
-            {
-                // don't allow acc to appear twice in a 3-src inst
-                return false;
-            }
-            threeSrcUses.push_back(useInst);
-            switch (opndNum)
-            {
-            case Opnd_src1:
-                break;  //OK
-
-            case Opnd_src0:
-
-                if (kernel.fg.builder->canMadHaveSrc0Acc())
-                {
-                    // OK
-                }
-                else if (useInst->opcode() == G4_mad)
-                {
-                    // we can turn this mad into a mac
-                    mustBeAcc0 = true;
-                    if (useInst->getSrc(0)->getType() == Type_HF && useInst->getMaskOffset() == 16)
-                    {
-                        // we must use acc1, and need to check that inst does not have an acc0 source
-                        // so that dst and src won't have different acc source
-                        if (inst->isAccSrcInst())
-                        {
-                            bool hasAcc0Src = false;
-                            auto isAcc0 = [](G4_SrcRegRegion* src)
-                            {
-                                return src->getBase()->asAreg()->getArchRegType() == AREG_ACC0;
-                            };
-                            if (inst->getSrc(0)->isSrcRegRegion() &&
-                                inst->getSrc(0)->asSrcRegRegion()->getBase()->isAccReg())
-                            {
-                                hasAcc0Src = isAcc0(inst->getSrc(0)->asSrcRegRegion());
-                            }
-                            else if (inst->getSrc(1)->isSrcRegRegion() &&
-                                inst->getSrc(1)->asSrcRegRegion()->getBase()->isAccReg())
-                            {
-                                hasAcc0Src = isAcc0(inst->getSrc(1)->asSrcRegRegion());
-                            }
-                            if (hasAcc0Src)
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                    madSrc0Use.push_back(useInst);
-                }
-                else
-                {
-                    return false;
-                }
-                break;
-            default:
-                return false;
-            }
-        }
-        else if (opndNum != Opnd_src0)
-        {
-            return false;
-        }
-
-        if (useInst->getSingleDef(opndNum) == nullptr)
-        {
-            // def must be the only define for this use
-            return false;
-        }
-
-        int srcId = opndNum == Opnd_src0 ? 0 : 1;
-        G4_Operand* src = useInst->getSrc(srcId);
-        if (dst->getType() != src->getType() || kernel.fg.globalOpndHT.isOpndGlobal(src) ||
-            dst->compareOperand(src) != Rel_eq)
-        {
-            return false;
-        }
-        if (!useInst->canSrcBeAcc(opndNum))
-        {
-            return false;
-        }
-    }
-
-    // we have to avoid the case where the dst is used as both src0 and src1 of a mad
-    for (auto madUse : madSrc0Use)
-    {
-        for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
-        {
-            auto&& use = *I;
-            G4_INST* useInst = use.first;
-            Gen4_Operand_Number opndNum = use.second;
-            if (madUse == useInst && opndNum == Opnd_src1)
-            {
-                return false;
-            }
-        }
-    }
-
-    if (lastUseId == 0)
-    {
-        // no point using acc for a dst without local uses
-        return false;
-    }
-
-    lastUse = lastUseId;
-    return true;
-}
-
-// replace an inst's dst and all of its (local) uses with acc
-// note that this may fail due to HW restrictions on acc
-static bool replaceDstWithAcc(G4_INST* inst, int accNum, IR_Builder& builder)
-{
-    G4_DstRegRegion* dst = inst->getDst();
-    bool useAcc1 = (accNum & 0x1) != 0;
-    accNum &= ~0x1;
-
-    if (!builder.relaxedACCRestrictions())
-    {
-        auto myAcc = useAcc1 ? AREG_ACC1 : AREG_ACC0;
-        // check that dst and src do not have different accumulator
-        for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
-        {
-            if (inst->getSrc(i)->isAccReg())
-            {
-                auto base = inst->getSrc(i)->asSrcRegRegion()->getBase();
-                if (base->isPhyAreg())
-                {
-                    if (base->asAreg()->getArchRegType() != myAcc)
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
-    for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
-    {
-        auto&& use = *I;
-        G4_INST* useInst = use.first;
-        if (!builder.canMadHaveSrc0Acc() && useInst->opcode() == G4_mad && use.second == Opnd_src0)
-        {
-            // if we are replacing mad with mac, additionally check if acc1 needs to be used
-            if (useInst->getMaskOffset() == 16 && dst->getType() == Type_HF)
-            {
-                if (builder.doMultiAccSub())
-                {
-                    // this is not legal since acc1 may be taken by another interval already
-                    return false;
-                }
-                useAcc1 = true;
-            }
-        }
-
-        if (!builder.relaxedACCRestrictions())
-        {
-            // do not allow an inst to have multiple acc source operands
-            if (useInst->getNumSrc() == 3)
-            {
-                if (useInst->getSrc(0)->isAccReg() || useInst->getSrc(1)->isAccReg())
-                {
-
-                    return false;
-                }
-            }
-            else if (useInst->opcode() == G4_mac)
-            {
-                // this can happen if we have to convert mad into mac (some platforms don't allow
-                // src0 acc for mad), and the mad's src1 is also an acc candidate.
-                return false;
-            }
-        }
-    }
-
-    // at this point acc substitution must succeed
-
-    G4_Areg* accReg = useAcc1 ? builder.phyregpool.getAcc1Reg() : builder.phyregpool.getAcc0Reg();
-    G4_DstRegRegion* accDst = builder.createDst(accReg,
-        (short)accNum, 0, 1, dst->getType());
-    accDst->setAccRegSel(inst->getDst()->getAccRegSel());
-    inst->setDest(accDst);
-    for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
-    {
-        auto&& use = *I;
-        G4_INST* useInst = use.first;
-        int srcId = use.second == Opnd_src0 ? 0 : 1;
-        G4_SrcRegRegion* oldSrc = useInst->getSrc(srcId)->asSrcRegRegion();
-        G4_SrcRegRegion* accSrc = builder.createSrcRegRegion(oldSrc->getModifier(), Direct,
-            accReg, (short)accNum, 0, builder.getRegionStride1(), dst->getType());
-        accSrc->setAccRegSel(oldSrc->getAccRegSel());
-        if (useInst->opcode() == G4_mad && srcId == 0 && !builder.canMadHaveSrc0Acc())
-        {
-            // change mad to mac as src0 of 3-src does not support acc
-            auto updateDefSrcPos = [](G4_INST* useInst, Gen4_Operand_Number origPos)
-            {
-                for (auto DI = useInst->def_begin(), DE = useInst->def_end(); DI != DE; ++DI)
-                {
-                    auto&& def = *DI;
-                    if (def.second == origPos)
-                    {
-                        for (auto UI = def.first->use_begin(), UE = def.first->use_end(); UI != UE; ++UI)
-                        {
-                            auto& use = *UI;
-                            if (use.first == useInst && use.second == origPos)
-                            {
-                                switch (use.second)
-                                {
-                                case Opnd_src1:
-                                    use.second = Opnd_src0;
-                                    break;
-                                case Opnd_src2:
-                                    use.second = Opnd_src1;
-                                    break;
-                                default:
-                                    assert(false && "unexpectd src pos");
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-            assert(accNum == 0 && "mad src0 may only use acc0");
-            G4_Operand* macSrc0 = useInst->getSrc(1);
-            updateDefSrcPos(useInst, Opnd_src1);
-            G4_Operand* macSrc1 = useInst->getSrc(2);
-            updateDefSrcPos(useInst, Opnd_src2);
-            useInst->setSrc(macSrc0, 0);
-            useInst->setSrc(macSrc1, 1);
-            useInst->setOpcode(G4_mac);
-            useInst->setImplAccSrc(accSrc);
-        }
-        else
-        {
-            useInst->setSrc(accSrc, srcId);
-        }
-    }
-
-    return true;
-}
-
 static bool isAccCandidate(G4_INST* inst, Gen4_Operand_Number opndNum, G4_Kernel& kernel)
 
 {
@@ -4837,257 +4372,6 @@ static bool isAccCandidate(G4_INST* inst, Gen4_Operand_Number opndNum, G4_Kernel
     }
 
     return true;
-}
-
-struct AccAssignment
-{
-    std::vector<bool> freeAccs;
-    std::list<AccInterval*> activeIntervals;
-    IR_Builder& builder;
-
-    AccAssignment(int numGeneralAcc, IR_Builder& m_builder) : builder(m_builder)
-    {
-        freeAccs.resize(numGeneralAcc, true);
-    }
-
-    // expire all intervals that end before the given interval
-    void expireIntervals(AccInterval* interval)
-    {
-        for (auto iter = activeIntervals.begin(), iterEnd = activeIntervals.end(); iter != iterEnd;)
-        {
-            AccInterval* active = *iter;
-            if (active->lastUse <= interval->inst->getLocalId())
-            {
-                assert(!freeAccs[active->assignedAcc] && "active interval's acc should not be free");
-                freeAccs[active->assignedAcc] = true;
-                if (active->needBothAcc(builder))
-                {
-                    assert(!freeAccs[active->assignedAcc + 1] && "active interval's acc should not be free");
-                    freeAccs[active->assignedAcc + 1] = true;
-                }
-                iter = activeIntervals.erase(iter);
-            }
-            else
-            {
-                ++iter;
-            }
-        }
-    }
-
-    // spill interval that is assigned to accID and remove it from active list
-    void spillInterval(int accID)
-    {
-        auto acc0Iter = std::find_if(activeIntervals.begin(), activeIntervals.end(),
-            [accID](AccInterval* interval) { return interval->assignedAcc == accID; });
-        assert(acc0Iter != activeIntervals.end() && "expect to find interval with acc0");
-        auto spillInterval = *acc0Iter;
-        assert(!spillInterval->isPreAssigned && "overlapping pre-assigned acc0");
-        spillInterval->assignedAcc = -1;
-        activeIntervals.erase(acc0Iter);
-        freeAccs[accID] = true;
-        if (spillInterval->needBothAcc(builder))
-        {
-            assert(accID % 2 == 0 && "accID must be even-aligned in this case");
-            freeAccs[accID + 1] = true;
-        }
-    }
-
-    // pre-assigned intervals (e.g., mach, addc) must use acc0 (and acc1 depending on inst type/size)
-    // we have to spill active intervals that occupy acc0/acc1.
-    // the pre-assigned interavl is also pushed to active list
-    void handlePreAssignedInterval(AccInterval* interval)
-    {
-        if (!freeAccs[interval->assignedAcc])
-        {
-            spillInterval(interval->assignedAcc);
-        }
-        freeAccs[interval->assignedAcc] = false;
-
-        if (interval->needBothAcc(builder))
-        {
-            assert(interval->assignedAcc == 0 && "Total 2 acc support right now");
-            if (!freeAccs[interval->assignedAcc + 1]) // && activeIntervals.size()
-            {
-                spillInterval(interval->assignedAcc + 1);
-            }
-            freeAccs[interval->assignedAcc + 1] = false;
-        }
-
-        activeIntervals.push_back(interval);
-    }
-
-    // pick a free acc for this interval
-    // returns true if a free acc is found, false otherwise
-    bool assignAcc(AccInterval* interval)
-    {
-        if (interval->isPreAssigned)
-        {
-            handlePreAssignedInterval(interval);
-            return true;
-        }
-
-        int step = interval->needBothAcc(builder) ? 2 : 1;
-        for (int i = 0, end = interval->mustBeAcc0 ? 1 : (int)freeAccs.size(); i < end; i += step)
-        {
-            if (freeAccs[i] && (!interval->needBothAcc(builder) || freeAccs[i + 1]))
-            {
-                interval->assignedAcc = i;
-                freeAccs[i] = false;
-                if (interval->needBothAcc(builder))
-                {
-                    freeAccs[i + 1] = false;
-                }
-
-                activeIntervals.push_back(interval);
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-
-void HWConformity::multiAccSubstitution(G4_BB* bb)
-{
-    int numGeneralAcc = kernel.getNumAcc();
-
-    std::vector<AccInterval*> intervals;
-
-
-    //build intervals for potential acc candidates as well as pre-existing acc uses from mac/mach/addc/etc
-    for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd; ++instIter)
-    {
-        G4_INST* inst = *instIter;
-        if (inst->defAcc())
-        {
-            // we should only have single def/use acc at this point, so any use would kill the def
-            auto iter = instIter;
-            auto useIter = std::find_if(++iter, instEnd, [](G4_INST* inst) { return inst->useAcc(); });
-            int lastUseId = useIter == instEnd ? bb->back()->getLocalId() : (*useIter)->getLocalId();
-            AccInterval* newInterval = new AccInterval(inst, lastUseId, true);
-            intervals.push_back(newInterval);
-        }
-        else
-        {
-            int lastUseId = 0;
-            bool mustBeAcc0 = false;
-            int bundleBCTimes = 0;
-            int bankBCTimes = 0;
-            int readSuppressionSrcs = 0;
-            if (isAccCandidate(inst, kernel, lastUseId, mustBeAcc0))
-            {
-                // this is a potential candidate for acc substitution
-                AccInterval* newInterval = new AccInterval(inst, lastUseId);
-                newInterval->mustBeAcc0 = mustBeAcc0;
-                newInterval->bankConflictTimes = bankBCTimes;
-                newInterval->bundleConflictTimes = bundleBCTimes;
-                newInterval->suppressionTimes = readSuppressionSrcs;
-
-                intervals.push_back(newInterval);
-            }
-    }
-}
-
-
-        //modified linear scan to assign free accs to intervals
-        AccAssignment accAssign(numGeneralAcc, builder);
-
-        for (auto interval : intervals)
-        {
-            // expire intervals
-            accAssign.expireIntervals(interval);
-
-            // assign interval
-            bool foundFreeAcc = accAssign.assignAcc(interval);
-
-            //Spill
-            if (!foundFreeAcc && accAssign.activeIntervals.size() != 0)
-            {
-                // check if we should spill one of the active intervals
-                auto spillCostCmp = [interval](AccInterval* intv1, AccInterval* intv2)
-                {
-                    if (!interval->mustBeAcc0)
-                    {
-                        return intv1->getSpillCost() < intv2->getSpillCost();
-                    }
-
-                    // different compr function if interval must use acc0
-                    if (intv1->assignedAcc == 0 && intv2->assignedAcc == 0)
-                    {
-                        return intv1->getSpillCost() < intv2->getSpillCost();
-                    }
-                    else if (intv1->assignedAcc == 0)
-                    {
-                        return true;
-                    }
-                    return false;
-                };
-                auto spillIter = std::min_element(accAssign.activeIntervals.begin(), accAssign.activeIntervals.end(),
-                    spillCostCmp);
-                auto spillCandidate = *spillIter;
-                if (interval->getSpillCost() > spillCandidate->getSpillCost() &&
-                    !spillCandidate->isPreAssigned &&
-                    !(interval->mustBeAcc0 && spillCandidate->assignedAcc != 0))
-                {
-                    bool tmpAssignValue[2];
-
-                    tmpAssignValue[0] = accAssign.freeAccs[spillCandidate->assignedAcc];
-                    accAssign.freeAccs[spillCandidate->assignedAcc] = true;
-                    if (spillCandidate->needBothAcc(builder))
-                    {
-                        tmpAssignValue[1] = accAssign.freeAccs[spillCandidate->assignedAcc + 1];
-                        accAssign.freeAccs[spillCandidate->assignedAcc + 1] = true;
-                    }
-
-                    if (accAssign.assignAcc(interval))
-                    {
-                        spillCandidate->assignedAcc = -1;
-                        accAssign.activeIntervals.erase(spillIter);
-                    }
-                    else
-                    {
-                        accAssign.freeAccs[spillCandidate->assignedAcc] = tmpAssignValue[0];
-                        if (spillCandidate->needBothAcc(builder))
-                        {
-                            accAssign.freeAccs[spillCandidate->assignedAcc + 1] = tmpAssignValue[1];
-                        }
-                    }
-                }
-            }
-        }
-
-        for (auto interval : intervals)
-        {
-            if (!interval->isPreAssigned && interval->assignedAcc != -1)
-            {
-                G4_INST* inst = interval->inst;
-                replaceDstWithAcc(inst, interval->assignedAcc, builder);
-
-                numAccSubDef++;
-                numAccSubUse += (int)inst->use_size();
-#if 0
-                std::cout << "Acc sub def inst: \n";
-                inst->emit(std::cout);
-                std::cout << "[" << inst->getLocalId() << "]\n";
-                std::cout << "Uses:\n";
-                for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
-                {
-                    auto&& use = *I;
-                    std::cout << "\t";
-                    use.first->emit(std::cout);
-                    std::cout << "[" << use.first->getLocalId() << "]\n";
-                }
-#endif
-    }
-}
-
-
-    for (int i = 0, end = (int)intervals.size(); i < end; ++i)
-    {
-        delete intervals[i];
-    }
-
-    return;
 }
 
 struct LiveNode
@@ -5203,97 +4487,6 @@ void HWConformity::localizeForAcc(G4_BB* bb)
     }
 
     return;
-}
-
-
-// substitute local operands with acc when possible
-void HWConformity::accSubstitution(G4_BB* bb)
-{
-    bb->resetLocalId();
-
-    if (builder.doMultiAccSub())
-    {
-        multiAccSubstitution(bb);
-        return;
-    }
-
-    for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd; ++instIter)
-    {
-        bool canDoAccSub = true;
-        G4_INST* inst = *instIter;
-
-        if (inst->defAcc())
-        {
-            // skip ahead till its single use
-            // we should only have single def/use acc at this point, so any use would
-            // kill the def
-            auto iter = instIter;
-            auto useIter = std::find_if(++iter, instEnd, [](G4_INST* inst) { return inst->useAcc(); });
-            if (useIter == instEnd)
-            {
-                return;
-            }
-            instIter = --useIter; // start at the use inst next time
-            continue;
-        }
-
-        int lastUseId = 0;
-        bool mustBeAcc0 = false; //ignored
-        if (!isAccCandidate(inst, kernel, lastUseId, mustBeAcc0))
-        {
-            continue;
-        }
-
-        // don't attempt acc sub if def and last use are too far apart
-        // this is a crude way to avoid a long running life range from blocking
-        // other acc sub opportunities
-        const int accWindow = 25;
-        if (lastUseId == 0 || lastUseId - inst->getLocalId() > accWindow)
-        {
-            continue;
-        }
-
-        // check for intervening acc usage between inst and its last use
-        auto subIter = instIter;
-        ++subIter;
-        for (int instId = inst->getLocalId() + 1; instId != lastUseId; ++subIter, ++instId)
-        {
-            G4_INST* anInst = *subIter;
-            if (anInst->useAcc() || anInst->mayExpandToAccMacro())
-            {
-                canDoAccSub = false;
-                break;
-            }
-        }
-
-        if (!canDoAccSub)
-        {
-            continue;
-        }
-        else
-        {
-            replaceDstWithAcc(inst, 0, builder);
-            // advance iter to the last use of the acc
-            instIter = subIter;
-            --instIter;
-
-            numAccSubDef++;
-            numAccSubUse += (int)inst->use_size();
-
-#if 0
-            std::cout << "Acc sub def inst: \n";
-            inst->emit(std::cout);
-            std::cout << "[" << inst->getLocalId() << "]\n";
-            std::cout << "Uses:\n";
-            for (auto&& use : inst->useInstList)
-            {
-                std::cout << "\t";
-                use.first->emit(std::cout);
-                std::cout << "[" << use.first->getLocalId() << "]\n";
-            }
-#endif
-        }
-    }
 }
 
 // find the location for hoisting the inst pointed to by start
@@ -5426,7 +4619,7 @@ bool HWConformity::convertMAD2MAC(INST_LIST_ITER iter, std::vector<G4_INST*>& ma
                 if (movDist > 0)
                 {
                     movTarget++;
-                    bb->insert(movTarget, useInst);
+                    bb->insertBefore(movTarget, useInst);
                     bb->erase(useIter);
                 }
                 uint32_t dstStrideSize = G4_Type_Table[useInst->getDst()->getType()].byteSize * useInst->getDst()->getHorzStride();
@@ -5529,39 +4722,6 @@ bool HWConformity::convertMAD2MAC(INST_LIST_ITER iter, std::vector<G4_INST*>& ma
     return false;
 }
 
-void HWConformity::convertComprInstSrcRegion(G4_INST* inst)
-{
-    for (int k = 0; k < 2; k++)
-    {
-        G4_Operand* src = inst->getSrc(k);
-
-        if (!src || src->isImm() || (inst->isMath() && k == 1 && src->isNullReg()))
-        {
-            continue;
-        }
-
-        if (!src->isSrcRegRegion()) {
-            continue;
-        }
-
-        int w = src->asSrcRegRegion()->getRegion()->width;
-        int hs = src->asSrcRegRegion()->getRegion()->horzStride;
-        int vs = src->asSrcRegRegion()->getRegion()->vertStride;
-
-        if (w == 1 && hs == 0 && vs == 0)
-        {
-            continue;
-        }
-
-        if (inst->getExecSize() < w)
-        {
-            const RegionDesc* rd =
-                builder.createRegionDesc((uint16_t)(vs / 2), (uint16_t)(w / 2), (uint16_t)(hs / 2));
-            src->asSrcRegRegion()->setRegion(rd);
-        }
-    }
-}
-
 // replace src/dst with ACC
 void HWConformity::addACCOpnd(
     G4_INST* curInst, bool needACCSrc, int dstStride, G4_Type accTy)
@@ -5654,7 +4814,7 @@ void HWConformity::convertMAD2MulAdd(INST_LIST_ITER iter, G4_BB* bb)
         inst->getCISAOff(),
         inst->getSrcFilename());
 
-    bb->insert(tIter, addOp);
+    bb->insertBefore(tIter, addOp);
 
     // predicate/condmod/saturate, if they exist, are propagated to the add instruction
     inst->setSaturate(false);
@@ -5845,7 +5005,7 @@ void HWConformity::fixSADA2Inst(G4_BB* bb)
             inst->setImplAccSrc(accSrcOpnd);
 
             ++newSada2Iter;
-            bb->insert(newSada2Iter, inst);
+            bb->insertBefore(newSada2Iter, inst);
             i = bb->erase(i);
 
             // maintain def-use
@@ -5919,7 +5079,7 @@ void HWConformity::fixSADA2Inst(G4_BB* bb)
 
             INST_LIST_ITER addLoc = i;
             ++addLoc;
-            bb->insert(addLoc, addInst);
+            bb->insertBefore(addLoc, addInst);
 
             // FIXME: redundant?
             inst->addDefUse(addInst, Opnd_src0);
@@ -6029,7 +5189,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
                 G4_SrcRegRegion* src = builder.createSrcRegRegion(Mod_src_undef, Direct, base, baseOff + idx, baseSubOff + 0, region, type);
                 G4_DstRegRegion* dst = builder.createDst(dcl->getRegVar(), idx, 0, 1, type);
                 G4_INST* newInst = builder.createMov(builder.getNativeExecSize(), dst, src, InstOpt_WriteEnable, false);
-                bb->insert(i, newInst);
+                bb->insertBefore(i, newInst);
             }
 
             G4_Operand* newSrc = builder.Create_Src_Opnd_From_Dcl(dcl, builder.getRegionStride1());
@@ -6460,15 +5620,17 @@ void HWConformity::conformBB(G4_BB* bb)
 }
 
 //
-// SIMD16 addc/subb are illegal on GEN, since they write to acc and there are only 8 acc
-// channels for D/UD type.  In vISA IR we should get something like
-// addc (16) V0 V2 V3
-// mov  (16) V1 acc0<8;8,1>:ud
+// SIMD16 addc/subb are illegal on GEN, since they write to acc and there are
+// only 8 acc channels for D/UD type.  In vISA IR we should get something like
+//   addc (16|M0) V0  V2       V3
+//   use  (16|M0) V1  ... acc0:ud // or :d
 // which needs to be translated to
-// addc (8) V0(0) V2(0) V3(0) {Q1}
-// mov (8) V1(0) acc0<8;8,1>:ud {Q1}
-// addc (8) V0(1) V2(1) V3(1) {Q2}
-// mov (8) V1(1) acc0<8;8,1>:ud {Q2}
+//   addc (8|M0)  V0(0)  V2(0)  V3(0)
+//   use  (8|M0)  V1(0) ... acc0:ud
+//   addc (8|M8)  V0(1)  V2(1)  V3(1)
+//   use  (8|M8)  V1(1) ... acc0:ud
+// NOTE: we also support other consumers such as add.
+//
 //
 // We do this first thing in HW conformity to avoid REXES from splitting addc/subb incorrectly
 // We also count on previous opt to preserve the inst pair by not inserting any acc using inst in between;
@@ -6476,13 +5638,12 @@ void HWConformity::conformBB(G4_BB* bb)
 //
 // If exec size of addc is < 8, we also have to make sure both the addc's dst and the carry move's dst are
 // GRF-aligned, since acc's channel is dependent on the dst's subreg offset.  In other words, we fix
-// addc (1) r1.0 ...
-// mov (1) r1.1 acc0.0<0;1,0>
+//   addc (1) r1.0 ...
+//   mov (1) r1.1 acc0.0<0;1,0>
 // into
-// addc (1) r1.0 ...
-// mov (1) r2.0 acc0.0<0;1,0>
-// mov (1) r1.1 r2.0
-//
+//   addc (1) r1.0 ...
+//   mov (1) r2.0 acc0.0<0;1,0>
+//   mov (1) r1.1 r2.0
 //
 bool HWConformity::fixAddcSubb(G4_BB* bb)
 {
@@ -6495,41 +5656,60 @@ bool HWConformity::fixAddcSubb(G4_BB* bb)
             inst->getExecSize() != builder.getNativeExecSize())
         {
             // find the matching carry move
-            G4_INST* carryMov = nullptr;
-            auto movIter = iter;
-            for (++movIter; movIter != iterEnd; ++movIter)
+            G4_INST* carryUse = nullptr;
+            auto srchIter = iter;
+            for (++srchIter; srchIter != iterEnd; ++srchIter)
             {
-                G4_INST* inst2 = *movIter;
-                if (inst2->opcode() == G4_mov && inst2->getExecSize() == inst->getExecSize() &&
-                    inst2->getSrc(0)->isAccReg() && inst2->getSrc(0)->getType() == Type_UD)
+                G4_INST* inst2 = *srchIter;
+                auto op = inst2->opcode();
+
+                bool opPossibleConsumer =
+                    op == G4_mov || op == G4_add || op == G4_addc ||
+                    op == G4_mad || op == G4_pseudo_mad;
+
+                auto srcUsesAcc = [&] (int srcIx) {
+                    if (srcIx >= inst2->getNumSrc())
+                        return false;
+                    auto type = inst2->getSrc(srcIx)->getType();
+                    return inst2->getSrc(srcIx)->isAccReg() &&
+                        (type == Type_UD || type == Type_D);
+                };
+
+                // only check for a handful of user instructions
+                // this list could be extended
+                if (opPossibleConsumer &&
+                    inst2->getExecSize() == inst->getExecSize() &&
+                    (srcUsesAcc(0) || srcUsesAcc(1) || srcUsesAcc(1)))
                 {
-                    carryMov = inst2;
+                    carryUse = inst2;
                     break;
                 }
                 else if (inst2->useAcc())
                 {
+                    // someone redefines acc0; we can stop looking
                     break;
                 }
             }
 
-            if (carryMov == NULL)
+            if (carryUse == NULL)
             {
                 // can't find the move using acc, skip this addc/subb
-                assert(false && "expect a carry move instruction");
+                assert(false && "unable to find addc/subc consumer");
                 continue;
             }
 
             if (inst->getExecSize() > builder.getNativeExecSize())
             {
+                // we're breaking a bigger instruction into a smaller one
                 evenlySplitInst(iter, bb);
-                evenlySplitInst(movIter, bb);
+                evenlySplitInst(srchIter, bb);
 
-                // movIter now points to the second half of move, and we want to move the first move to be
+                // srchIter now points to the second half of move, and we want to move the first move to be
                 // before the second half of the addc/subb, which is pointed by iter
-                --movIter;
-                G4_INST* mov1 = *movIter;
-                bb->erase(movIter);
-                bb->insert(iter, mov1);
+                --srchIter;
+                G4_INST* mov1 = *srchIter;
+                bb->erase(srchIter);
+                bb->insertBefore(iter, mov1);
 
                 changed = true;
             }
@@ -6544,10 +5724,10 @@ bool HWConformity::fixAddcSubb(G4_BB* bb)
                         insertMovAfter(iter, inst->getDst(), inst->getDst()->getType(), bb));
                     changed = true;
                 }
-                if (!builder.isOpndAligned(carryMov->getDst(), 32))
+                if (!builder.isOpndAligned(carryUse->getDst(), 32))
                 {
-                    carryMov->setDest(
-                        insertMovAfter(movIter, carryMov->getDst(), carryMov->getDst()->getType(), bb));
+                    carryUse->setDest(
+                        insertMovAfter(srchIter, carryUse->getDst(), carryUse->getDst()->getType(), bb));
                     changed = true;
                 }
             }
@@ -6580,16 +5760,6 @@ void HWConformity::chkHWConformity()
         // reducing execution size.
         // used by 3d. Mainly to fix sel with two imm sources
         fixOpndTypeAlign(bb);
-
-#ifdef _DEBUG
-        verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
-#endif
-
-        if (builder.getOption(vISA_accSubstitution) &&
-            !builder.getOption(vISA_doAccSubAfterSchedule))
-        {
-            accSubstitution(bb);
-        }
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
@@ -6831,7 +6001,7 @@ bool HWConformity::splitInstListForByteDst(INST_LIST_ITER it, G4_BB* bb, uint16_
             new_iter++;
             G4_INST* secondHalfOp = splitInstWithByteDst(expand_op);
             MUST_BE_TRUE(secondHalfOp, "Error in spliting instruction.");
-            bb->insert(new_iter, secondHalfOp);
+            bb->insertBefore(new_iter, secondHalfOp);
         }
     }
 
@@ -6969,7 +6139,8 @@ G4_INST* HWConformity::splitInstWithByteDst(G4_INST* expand_op)
             }
         }
     }
-    expand_sec_half_op->setLineNo(expand_op->getLineNo());
+    expand_sec_half_op->setLocation(expand_op->getLocation());
+    expand_sec_half_op->setCISAOff(expand_op->getCISAOff());
 
     if (expand_op->getPredicate() || expand_op->getCondMod())
     {
@@ -7422,7 +6593,7 @@ static void expandPlaneMacro(IR_Builder& builder, INST_LIST_ITER it, G4_BB* bb, 
         builder.Create_Dst_Opnd_From_Dcl(tmpVal, 1);
     G4_INST* madInst = builder.createInternalInst(nullptr, G4_mad, nullptr, false, 8, accDst,
         srcR, u, srcP, options | InstOpt_WriteEnable)->InheritLLVMInst(inst);
-    bb->insert(it, madInst);
+    bb->insertBefore(it, madInst);
 
     G4_Predicate* pred = inst->getPredicate() ? builder.duplicateOperand(inst->getPredicate()) : nullptr;
     G4_CondMod* condMod = inst->getCondMod() ? builder.duplicateOperand(inst->getCondMod()) : nullptr;
@@ -7433,7 +6604,7 @@ static void expandPlaneMacro(IR_Builder& builder, INST_LIST_ITER it, G4_BB* bb, 
         dst->getRegOff() + (secondHalf ? 1 : 0), dst->getSubRegOff(), dst->getHorzStride(), dst->getType());
     G4_INST* secondMadInst = builder.createInternalInst(pred, G4_mad, condMod, inst->getSaturate(), 8, newDst,
         accSrc, v, srcQ, options)->InheritLLVMInst(inst);
-    bb->insert(it, secondMadInst);
+    bb->insertBefore(it, secondMadInst);
 }
 
 // Replace plane with a macro sequence:
@@ -7536,7 +6707,7 @@ bool HWConformity::fixPlaneInst(INST_LIST_ITER it, G4_BB* bb)
 
             G4_INST* newInst = builder.createMov(4, dstRgn, srcRgn, InstOpt_NoOpt, false);
 
-            bb->insert(it, newInst);
+            bb->insertBefore(it, newInst);
 
             rd = builder.getRegionScalar();
             G4_SrcRegRegion* newSrcRgn = builder.createSrcRegRegion(
@@ -7592,7 +6763,7 @@ bool HWConformity::fixPlaneInst(INST_LIST_ITER it, G4_BB* bb)
 
                 G4_INST* newInst = builder.createMov(16, dstRgn, srcRgn, InstOpt_NoOpt, false);
 
-                bb->insert(it, newInst);
+                bb->insertBefore(it, newInst);
 
                 if (i == 0)
                 {
@@ -7665,12 +6836,11 @@ void HWConformity::fixImm64(INST_LIST_ITER i,
             G4_DstRegRegion* dstRegion = builder.Create_Dst_Opnd_From_Dcl(dcl, 1);
             G4_INST* lowMovInst = builder.createMov(1, dstRegion, lowImm, InstOpt_WriteEnable, false);
 
-            bb->insert(i, lowMovInst);
+            bb->insertBefore(i, lowMovInst);
 
-            G4_DstRegRegion* dstRegionNext = builder.Create_Dst_Opnd_From_Dcl(dcl, 1);
-            G4_INST* highMovInst = builder.createMov(1, dstRegionNext, highImm, InstOpt_WriteEnable, false);
-            dstRegionNext->setSubRegOff(1);
-            bb->insert(i, highMovInst);
+            auto newDst = builder.createDst(dcl->getRegVar(), 0, 1, 1, dcl->getElemType());
+            G4_INST* highMovInst = builder.createMov(1, newDst, highImm, InstOpt_WriteEnable, false);
+            bb->insertBefore(i, highMovInst);
 
             inst->transferDef(lowMovInst, Gen4_Operand_Number(j + 1), Opnd_src0);
             lowMovInst->addDefUse(inst, Gen4_Operand_Number(j + 1));
@@ -7775,7 +6945,7 @@ void HWConformity::helperGenerateTempDst(
 
     ++instIter;
     //inserting mov after fixed instruction
-    bb->insert(instIter, movInst);
+    bb->insertBefore(instIter, movInst);
 
     /*
     Need to remove dst from uses list of mulh, and add them to movInst useList
@@ -8179,7 +7349,7 @@ void HWConformity::fixPredCtrl(INST_LIST_ITER it, G4_BB* bb)
                 auto andInst = builder.createBinOp(G4_and, 1, builder.Create_Dst_Opnd_From_Dcl(tmpFlag, 1),
                     builder.Create_Src_Opnd_From_Dcl(flagDcl, builder.getRegionScalar()),
                     builder.createImm(allOneMask, Type_UW), InstOpt_WriteEnable, false);
-                bb->insert(it, andInst);
+                bb->insertBefore(it, andInst);
                 cmpSrc0Flag = tmpFlag;
             }
             G4_CondMod* condMod = builder.createCondMod(pred->getControl() == PRED_ANY_WHOLE ? Mod_ne : Mod_e,
@@ -8190,7 +7360,7 @@ void HWConformity::fixPredCtrl(INST_LIST_ITER it, G4_BB* bb)
             auto cmpInst = builder.createInternalInst(nullptr, G4_cmp, condMod, false, inst->getExecSize(), builder.createNullDst(flagType),
                 builder.createSrcRegRegion(Mod_src_undef, Direct, cmpSrc0Flag->getRegVar(), 0, 0, builder.getRegionScalar(), flagType),
                 immVal, InstOpt_WriteEnable);
-            bb->insert(it, cmpInst);
+            bb->insertBefore(it, cmpInst);
             inst->setPredicate(builder.createPredicate(pred->getState(), tmpFlag->getRegVar(), 0));
         }
     }

@@ -99,6 +99,7 @@ namespace IGC
             SymbolListTy global;      // global symbols
             SymbolListTy globalConst; // global constant symbols
             SymbolListTy sampler;     // sampler symbols
+            SymbolListTy local;       // local symbols
         };
 
     public:
@@ -213,6 +214,7 @@ namespace IGC
     enum InstrStatTypes
     {
         SROA_PROMOTED,
+        LICM_STAT,
         TOTAL_TYPES
     };
     enum InstrStatStage
@@ -257,6 +259,7 @@ namespace IGC
         bool hasTypedwrite;
         bool mayHaveIndirectOperands;  //<! true if code may have indirect operands like r5[a0].
         bool hasUniformAssumptions;
+        bool hasWaveIntrinsics;
         unsigned int numSample;
         unsigned int numBB;
         unsigned int numLoopInsts;
@@ -268,28 +271,57 @@ namespace IGC
 
     struct SSimplePushInfo
     {
+        // Constant buffer BTI - valid only if isStateless is false
         uint m_cbIdx = 0;
+        // m_pushableAddressGrfOffset and m_pushableOffsetGrfOffset are GRF
+        // offsets in the runtime data pushed to the shader. UMD uses these
+        // offsets to calculate the starting address of a simple push region.
+        // These fields are valid only if greater or equal to 0 and if
+        // isStateless is true. Offsets are in DWORDs.
+        // Runtime data starting at m_pushableAddressGrfOffset contains the
+        // 64bit stateless address, data starting at m_pushableOffsetGrfOffset
+        // contains 32bit offset relative to the 64bit starting address.
+        // pseudo-code to calculate the address:
+        //   uint8_t* pShaderRuntimeData ={...}; // to be pushed
+        //   uint64_t pushableAddress =
+        //     *(uint64_t*)(pShaderRuntimeData + 4*pushableAddressGrfOffset);
+        //   if (pushableOffsetGrfOffset >=0) {
+        //     pushableAddress +=
+        //       *(uint32_t*)(pShaderRuntimeData + 4*pushableOffsetGrfOffset);
+        //   }
+        //   pushableAddress += m_offset;
+        int m_pushableAddressGrfOffset = -1;
+        int m_pushableOffsetGrfOffset = -1;
+        // Immediate offset in bytes add to the start of the simple push region.
         uint m_offset = 0;
+        // Data size in bytes, must be a multiple of GRF size
         uint m_size = 0;
         bool isStateless = false;
     };
 
-    struct SConstantAddrValue
+
+    enum SIMDInfoBit
     {
-        ConstantAddress ca;
-        bool anyValue;
-        uint32_t value;
-        uint32_t instCount = 0;
-        uint32_t branchCount = 0;
-        uint32_t loopCount = 0;
-        uint32_t samplerCount = 0;
-        uint32_t extendedMath = 0;
-        uint32_t selectCount = 0;
-        uint32_t weight = 0;
+        SIMD_SELECTED,       // 0: if the SIMD is selected. If 1, all the other bits are ignored.
+        SIMD_RETRY,          // 1: is a retry
+        SIMD_SKIP_HW,        // 2: skip this SIMD due to HW restriction / WA.
+        SIMD_SKIP_REGPRES,   // 3: skip this SIMD due to register pressure early out.
+        SIMD_SKIP_SPILL,     // 4: skip this SIMD due to spill or high chance of spilling.
+        SIMD_SKIP_STALL,     // 5: skip this SIMD due to stall cycle or thread occupancy heuristic.
+        SIMD_SKIP_THGRPSIZE, // 6: skip due to threadGroupSize heuristic(CS / OCL only).
+        SIMD_SKIP_PERF       // 7: skip this SIMD due to performance concern (dx12 + discard, MRT, etc) or other reasons.
+    };
+
+    enum SIMDInfoOffset
+    {
+        SIMD8_OFFSET = 0,
+        SIMD16_OFFSET = 8,
+        SIMD32_OFFSET = 16,
     };
 
     struct SKernelProgram
     {
+        SProgramOutput simd1;
         SProgramOutput simd8;
         SProgramOutput simd16;
         SProgramOutput simd32;
@@ -321,8 +353,7 @@ namespace IGC
 
         SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
-        // Interesting constants for dynamic constant folding
-        std::vector<SConstantAddrValue> m_pInterestingConstants;
+        uint64_t    SIMDInfo;
     };
 
     struct SPixelShaderKernelProgram : SKernelProgram
@@ -827,7 +858,7 @@ namespace IGC
         std::vector<int> m_gsNonDefaultIdxMap;
         std::vector<int> m_psIdxMap;
         DWORD LtoUsedMask = 0;
-
+        uint64_t m_SIMDInfo;
 
     protected:
         // Objects pointed to by these pointers are owned by this class.
@@ -847,7 +878,8 @@ namespace IGC
             const CDriverInfo& driverInfo, ///< Queries to know runtime features support
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* LLVMContext = nullptr)///< LLVM context to use, if null a new one will be created
-            : type(_type), platform(_platform), btiLayout(_bitLayout), m_DriverInfo(driverInfo), llvmCtxWrapper(LLVMContext)
+            : type(_type), platform(_platform), btiLayout(_bitLayout), m_DriverInfo(driverInfo),
+            llvmCtxWrapper(LLVMContext), m_SIMDInfo(0)
         {
             if (llvmCtxWrapper == nullptr)
             {
@@ -893,6 +925,7 @@ namespace IGC
         virtual ~CodeGenContext();
         void clear();
         void EmitError(const char* errorstr);
+        bool HasError() const;
         CompOptions& getCompilerOption();
         virtual void resetOnRetry();
         virtual uint32_t getNumThreadsPerEU() const;
@@ -906,6 +939,47 @@ namespace IGC
         {
             return m_Stats;
         }
+
+        unsigned int GetSIMDInfoOffset(SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = 0;
+
+            switch (mode) {
+            case ShaderDispatchMode::NOT_APPLICABLE:
+                switch (simd) {
+                case SIMDMode::SIMD8:
+                    offset = SIMD8_OFFSET;
+                    break;
+                case SIMDMode::SIMD16:
+                    offset = SIMD16_OFFSET;
+                    break;
+                case SIMDMode::SIMD32:
+                    offset = SIMD32_OFFSET;
+                    break;
+                default:
+                    break;
+                }
+                break;
+
+            default:
+                break;
+            }
+            return offset;
+        }
+
+        void SetSIMDInfo(SIMDInfoBit bit, SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = GetSIMDInfoOffset(simd, mode);
+            m_SIMDInfo |= (uint64_t)1 << (bit + offset);
+        }
+
+        void ClearSIMDInfo(SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = GetSIMDInfoOffset(simd, mode);
+            m_SIMDInfo &= ~(0xff << offset);
+        }
+
+        uint64_t GetSIMDInfo() { return m_SIMDInfo; }
     };
 
     class VertexShaderContext : public CodeGenContext
@@ -1137,6 +1211,15 @@ namespace IGC
                 {
                     PreferBindlessImages = true;
                 }
+                if (strstr(options, "-intel-use-bindless-mode"))
+                {
+                    // This is a new option that combines bindless generation for buffers
+                    // and images. Keep the old internal options to have compatibility
+                    // for existing tests. Those (old) options could be removed in future.
+                    UseBindlessMode = true;
+                    PreferBindlessImages = true;
+                    PromoteStatelessToBindless = true;
+                }
                 if (strstr(options, "-intel-force-global-mem-allocation"))
                 {
                     IntelForceGlobalMemoryAllocation = true;
@@ -1176,6 +1259,7 @@ namespace IGC
             bool IntelEnablePreRAScheduling = true;
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
+            bool UseBindlessMode = false;
             bool IntelForceGlobalMemoryAllocation = false;
             bool hasNoLocalToGeneric = false;
 

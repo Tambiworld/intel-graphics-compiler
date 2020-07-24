@@ -166,6 +166,9 @@ namespace IGC
         /// If this type is derived from a base type then return base type size
         /// even if it derived directly or indirectly from Composite Type
         uint64_t getBasicTypeSize(llvm::DIDerivedType* Ty);
+        /// If this type is derived from a base type then return base type size
+        /// even if it derived directly or indirectly from Derived Type
+        uint64_t getBasicTypeSize(llvm::DICompositeType* Ty);
 
         /// Return base type size even if it derived directly or indirectly from Composite Type
         uint64_t getBasicSize(DwarfDebug* DD);
@@ -389,6 +392,8 @@ namespace IGC
         unsigned NextStringPoolNumber;
         std::string StringPref;
 
+        llvm::DenseMap<VISAModule*, llvm::Function*> VISAModToFunc;
+
     private:
 
         void addScopeVariable(::IGC::LexicalScope* LS, DbgVariable* Var);
@@ -459,9 +464,6 @@ namespace IGC
 
         /// \brief Emit visible names into a debug macinfo section.
         void emitDebugMacInfo();
-
-        /// \brief Emit debug frame section to allow stack traversal.
-        void emitDebugFrame();
 
         /// \brief Recursively Emits a debug information entry.
         void emitDIE(DIE* Die);
@@ -619,6 +621,37 @@ namespace IGC
             }
             return false;
         }
+
+        void AddVISAModToFunc(VISAModule* M, llvm::Function* F)
+        {
+            VISAModToFunc[M] = F;
+        }
+
+        llvm::Function* GetFunction(VISAModule* M)
+        {
+            auto it = VISAModToFunc.find(M);
+            if (it != VISAModToFunc.end())
+                return (*it).second;
+            return nullptr;
+        }
+
+        VISAModule* GetVISAModule(const llvm::Function* F)
+        {
+            for (auto& p : VISAModToFunc)
+            {
+                if (p.second == F)
+                    return p.first;
+            }
+            return nullptr;
+        }
+
+        bool IsDirectElfInput() const
+        {
+            if (!m_pModule)
+                return false;
+
+            return m_pModule->isDirectElfInput;
+        }
     private:
         // Store all DISubprogram nodes from LLVM IR as they are no longer available
         // in DICompileUnit
@@ -666,7 +699,7 @@ namespace IGC
 
         unsigned int lowPc = 0, highPc = 0;
 
-		// SIMD width
+        // SIMD width
         unsigned short simdWidth = 0;   // Not set until IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging)
 
         DbgDecoder* getDecodedDbg() { return decodedDbg; }
@@ -684,8 +717,14 @@ namespace IGC
     private:
         void encodeRange(CompileUnit* TheCU, DIE* ScopeDIE, const llvm::SmallVectorImpl<InsnRange>* Ranges);
         void writeCIE();
-        void writeFDE(DbgDecoder::SubroutineInfo& sub);
-        const uint8_t returnReg = 128;
+        void writeFDESubroutine(VISAModule* m);
+        void writeFDEStackCall(VISAModule* m);
+        bool DwarfFrameSectionNeeded()
+        {
+            return (m_pModule->hasOrIsStackCall() || (m_pModule->getSubroutines()->size() > 0));
+        }
+        const uint16_t returnReg = 256;
+        const uint16_t fpReg = 257;
     };
 } // namespace IGC
 

@@ -85,6 +85,38 @@ CMKernel::~CMKernel()
     delete m_btiLayout.getModifiableLayout();
 }
 
+static zebin::PreDefinedAttrGetter::ArgType getZEArgType(iOpenCL::DATA_PARAMETER_TOKEN type) {
+    switch(type) {
+    case iOpenCL::DATA_PARAMETER_ENQUEUED_LOCAL_WORK_SIZE:
+        return zebin::PreDefinedAttrGetter::ArgType::local_size;
+    case iOpenCL::DATA_PARAMETER_GLOBAL_WORK_OFFSET:
+        return zebin::PreDefinedAttrGetter::ArgType::global_id_offset;
+    case iOpenCL::DATA_PARAMETER_NUM_WORK_GROUPS:
+        // copied from OCL behavior
+        return zebin::PreDefinedAttrGetter::ArgType::group_size;
+    default:
+        IGC_ASSERT_MESSAGE(0, "unsupported argument type");
+        return zebin::PreDefinedAttrGetter::ArgType::arg_byvalue;
+    }
+}
+
+static zebin::PreDefinedAttrGetter::ArgAccessType getZEArgAccessType(cmc_access_kind accessKind)
+{
+    switch(accessKind)
+    {
+    case cmc_access_kind::read_only:
+        return zebin::PreDefinedAttrGetter::ArgAccessType::readonly;
+    case cmc_access_kind::write_only:
+        return zebin::PreDefinedAttrGetter::ArgAccessType::writeonly;
+    case cmc_access_kind::read_write:
+        return zebin::PreDefinedAttrGetter::ArgAccessType::readwrite;
+    case cmc_access_kind::undef:
+    default:
+        IGC_ASSERT_MESSAGE(0, "invalid access type");
+        return zebin::PreDefinedAttrGetter::ArgAccessType::readwrite;
+    }
+}
+
 void CMKernel::createConstArgumentAnnotation(unsigned argNo, unsigned sizeInBytes, unsigned payloadPosition)
 {
     iOpenCL::ConstantArgumentAnnotation* constInput = new iOpenCL::ConstantArgumentAnnotation;
@@ -98,6 +130,10 @@ void CMKernel::createConstArgumentAnnotation(unsigned argNo, unsigned sizeInByte
     constInput->LocationCount = 0;
     constInput->IsEmulationArgument = false;
     m_kernelInfo.m_constantArgumentAnnotation.push_back(constInput);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+            zebin::ZEInfoBuilder::addPayloadArgumentByValue(m_kernelInfo.m_zePayloadArgs,
+                payloadPosition, sizeInBytes, argNo);
 }
 
 // TODO: this is incomplete.
@@ -118,6 +154,9 @@ void CMKernel::createSamplerAnnotation(unsigned argNo)
     samplerArg->PayloadPosition = 0;
 
     m_kernelInfo.m_samplerArgument.push_back(samplerArg);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        IGC_ASSERT_MESSAGE(0, "not yet supported for L0 binary");
 }
 
 void CMKernel::createImageAnnotation(unsigned argNo, unsigned BTI, unsigned dim, bool isWriteable)
@@ -145,44 +184,44 @@ void CMKernel::createImageAnnotation(unsigned argNo, unsigned BTI, unsigned dim,
     imageInput->PayloadPosition = 0;
     imageInput->Writeable = isWriteable;
     m_kernelInfo.m_imageInputAnnotations.push_back(imageInput);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        IGC_ASSERT_MESSAGE(0, "not yet supported for L0 binary");
 }
 
 void CMKernel::createImplicitArgumentsAnnotation(unsigned payloadPosition)
 {
-    for (int i = 0; i < 6; ++i) {
-        iOpenCL::ConstantInputAnnotation* constInput = new iOpenCL::ConstantInputAnnotation;
-        DWORD sizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-
-        constInput->AnnotationSize = sizeof(constInput);
-        constInput->ConstantType = (i < 3 ? iOpenCL::DATA_PARAMETER_GLOBAL_WORK_OFFSET
-                                          : iOpenCL::DATA_PARAMETER_LOCAL_WORK_SIZE);
-        constInput->Offset = (i % 3) * sizeInBytes;
-        constInput->PayloadPosition = payloadPosition;
-        constInput->PayloadSizeInBytes = sizeInBytes;
-        constInput->ArgumentNumber = 0;
-        constInput->LocationIndex = 0;
-        constInput->LocationCount = 0;
-        m_kernelInfo.m_constantInputAnnotation.push_back(constInput);
-
-        payloadPosition += sizeInBytes;
-    }
+    createSizeAnnotation(payloadPosition, iOpenCL::DATA_PARAMETER_GLOBAL_WORK_OFFSET);
+    payloadPosition += 3 * iOpenCL::DATA_PARAMETER_DATA_SIZE;
+    createSizeAnnotation(payloadPosition, iOpenCL::DATA_PARAMETER_LOCAL_WORK_SIZE);
 }
 
-void CMKernel::createPointerGlobalAnnotation(unsigned argNo, unsigned byteSize, unsigned payloadPosition, int BTI)
+void CMKernel::createPointerGlobalAnnotation(const cmc_arg_info &argInfo)
 {
     iOpenCL::PointerArgumentAnnotation* ptrAnnotation = new iOpenCL::PointerArgumentAnnotation;
     ptrAnnotation->IsStateless = true;
     ptrAnnotation->IsBindlessAccess = false;
     ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_GLOBAL;
     ptrAnnotation->AnnotationSize = sizeof(ptrAnnotation);
-    ptrAnnotation->ArgumentNumber = argNo;
-    ptrAnnotation->BindingTableIndex = BTI;
-    ptrAnnotation->PayloadPosition = payloadPosition;
-    ptrAnnotation->PayloadSizeInBytes = byteSize;
+    ptrAnnotation->ArgumentNumber = argInfo.index;
+    ptrAnnotation->BindingTableIndex = argInfo.BTI;
+    ptrAnnotation->PayloadPosition = argInfo.offset;
+    ptrAnnotation->PayloadSizeInBytes = argInfo.sizeInBytes;
     ptrAnnotation->LocationIndex = 0;
     ptrAnnotation->LocationCount = 0;
     ptrAnnotation->IsEmulationArgument = false;
     m_kernelInfo.m_pointerArgument.push_back(ptrAnnotation);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+    {
+        zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
+            argInfo.offset, argInfo.sizeInBytes, argInfo.index,
+            zebin::PreDefinedAttrGetter::ArgAddrMode::stateless,
+            zebin::PreDefinedAttrGetter::ArgAddrSpace::global,
+            getZEArgAccessType(argInfo.access));
+        zebin::ZEInfoBuilder::addBindingTableIndex(m_kernelInfo.m_zeBTIArgs,
+            argInfo.BTI, argInfo.index);
+    }
 }
 
 void CMKernel::createPrivateBaseAnnotation(
@@ -201,9 +240,12 @@ void CMKernel::createPrivateBaseAnnotation(
   ptrAnnotation->PayloadPosition = payloadPosition;
   ptrAnnotation->PayloadSizeInBytes = byteSize;
   m_kernelInfo.m_pointerInput.push_back(ptrAnnotation);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        IGC_ASSERT_MESSAGE(0, "not yet supported for L0 binary");
 }
 
-void CMKernel::createBufferStatefulAnnotation(unsigned argNo)
+void CMKernel::createBufferStatefulAnnotation(unsigned argNo, cmc_access_kind accessKind)
 {
     iOpenCL::ConstantInputAnnotation* constInput = new iOpenCL::ConstantInputAnnotation;
 
@@ -216,11 +258,24 @@ void CMKernel::createBufferStatefulAnnotation(unsigned argNo)
     constInput->LocationIndex = 0;
     constInput->LocationCount = 0;
     m_kernelInfo.m_constantInputAnnotation.push_back(constInput);
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+    {
+        zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
+            0, 0, argNo,
+            zebin::PreDefinedAttrGetter::ArgAddrMode::stateful,
+            zebin::PreDefinedAttrGetter::ArgAddrSpace::global,
+            getZEArgAccessType(accessKind));
+    }
 }
 
-void CMKernel::createSizeAnnotation(unsigned payloadPosition, int32_t Type)
+void CMKernel::createSizeAnnotation(unsigned initPayloadPosition,
+                                    iOpenCL::DATA_PARAMETER_TOKEN Type)
 {
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0, payloadPosition = initPayloadPosition;
+         i < 3;
+         ++i, payloadPosition += iOpenCL::DATA_PARAMETER_DATA_SIZE)
+    {
         iOpenCL::ConstantInputAnnotation* constInput = new iOpenCL::ConstantInputAnnotation;
         DWORD sizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
 
@@ -233,9 +288,11 @@ void CMKernel::createSizeAnnotation(unsigned payloadPosition, int32_t Type)
         constInput->LocationIndex = 0;
         constInput->LocationCount = 0;
         m_kernelInfo.m_constantInputAnnotation.push_back(constInput);
-
-        payloadPosition += sizeInBytes;
     }
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+            getZEArgType(Type), initPayloadPosition,
+            iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
 }
 
 // TODO: refactor this function with the OCL part.
@@ -353,7 +410,24 @@ const char* cmc::getPlatformStr(PLATFORM platform)
     return "SKL";
 }
 
-static void generatePatchTokens_v2(const cmc_kernel_info_v2 *info, CMKernel& kernel)
+static void generateSymbols(const cmc_kernel_info_v2 &info,
+                            IGC::SProgramOutput &kernelProgram)
+{
+    if (info.RelocationTable.Size > 0) {
+      kernelProgram.m_funcRelocationTable = info.RelocationTable.Buf;
+      kernelProgram.m_funcRelocationTableSize = info.RelocationTable.Size;
+      kernelProgram.m_funcRelocationTableEntries =
+          info.RelocationTable.NumEntries;
+    }
+    if (info.SymbolTable.Size > 0) {
+      kernelProgram.m_funcSymbolTable = info.SymbolTable.Buf;
+      kernelProgram.m_funcSymbolTableSize = info.SymbolTable.Size;
+      kernelProgram.m_funcSymbolTableEntries = info.SymbolTable.NumEntries;
+    }
+}
+
+static void generatePatchTokens_v2(const cmc_kernel_info_v2 *info,
+                                   CMKernel& kernel)
 {
     // This is the starting constant thread payload
     // r0-r3 are reserved for SIMD8 dispatch.
@@ -390,30 +464,31 @@ static void generatePatchTokens_v2(const cmc_kernel_info_v2 *info, CMKernel& ker
 
     for (unsigned i = 0; i < info->num_args; ++i) {
         IGC_ASSERT(info->arg_descs);
-        cmc_arg_info& AI = info->arg_descs[i];
+        cmc_arg_info AI = info->arg_descs[i];
         if (AI.offset > 0)
             maxArgEnd = std::max(AI.offset + AI.sizeInBytes, maxArgEnd);
         bool isWriteable = AI.access != cmc_access_kind::read_only;
+        AI.offset -= constantPayloadStart;
 
         switch (AI.kind) {
         default:
             break;
         case cmc_arg_kind::General:
-            kernel.createConstArgumentAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart);
+            kernel.createConstArgumentAnnotation(AI.index, AI.sizeInBytes, AI.offset);
             break;
         case cmc_arg_kind::LocalSize:
-            kernel.createSizeAnnotation(AI.offset - constantPayloadStart, iOpenCL::DATA_PARAMETER_ENQUEUED_LOCAL_WORK_SIZE);
+            kernel.createSizeAnnotation(AI.offset, iOpenCL::DATA_PARAMETER_ENQUEUED_LOCAL_WORK_SIZE);
             break;
         case cmc_arg_kind::GroupCount:
-            kernel.createSizeAnnotation(AI.offset - constantPayloadStart, iOpenCL::DATA_PARAMETER_NUM_WORK_GROUPS);
+            kernel.createSizeAnnotation(AI.offset, iOpenCL::DATA_PARAMETER_NUM_WORK_GROUPS);
             break;
         case cmc_arg_kind::Buffer:
-            kernel.createPointerGlobalAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart, AI.BTI);
-            kernel.createBufferStatefulAnnotation(AI.index);
+            kernel.createPointerGlobalAnnotation(AI);
+            kernel.createBufferStatefulAnnotation(AI.index, AI.access);
             kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             break;
         case cmc_arg_kind::SVM:
-            kernel.createPointerGlobalAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart, AI.BTI);
+            kernel.createPointerGlobalAnnotation(AI);
             kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             break;
         case cmc_arg_kind::Sampler:
@@ -437,14 +512,14 @@ static void generatePatchTokens_v2(const cmc_kernel_info_v2 *info, CMKernel& ker
             kernel.m_kernelInfo.m_printfBufferAnnotation->AnnotationSize = sizeof(kernel.m_kernelInfo.m_printfBufferAnnotation);
             kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             kernel.m_kernelInfo.m_printfBufferAnnotation->ArgumentNumber = AI.index;
-            kernel.m_kernelInfo.m_printfBufferAnnotation->PayloadPosition = AI.offset - constantPayloadStart;
+            kernel.m_kernelInfo.m_printfBufferAnnotation->PayloadPosition = AI.offset;
             kernel.m_kernelInfo.m_printfBufferAnnotation->Index = 0;
             kernel.m_kernelInfo.m_printfBufferAnnotation->DataSize = 8;
             break;
         case cmc_arg_kind::PrivateBase:
             if (info->StatelessPrivateMemSize) {
                 kernel.createPrivateBaseAnnotation(AI.index, AI.sizeInBytes,
-                    AI.offset - constantPayloadStart, AI.BTI, info->StatelessPrivateMemSize);
+                    AI.offset, AI.BTI, info->StatelessPrivateMemSize);
                 kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             }
             break;
@@ -455,25 +530,11 @@ static void generatePatchTokens_v2(const cmc_kernel_info_v2 *info, CMKernel& ker
     ConstantBufferLength = iSTD::Align(ConstantBufferLength, info->GRFByteSize) / info->GRFByteSize;
     kernel.m_kernelInfo.m_kernelProgram.ConstantBufferLength = ConstantBufferLength;
 
-    IGC::SProgramOutput *kernelProgram = nullptr;
-    if (info->CompiledSIMDSize == 8)
-      kernelProgram = &kernel.m_kernelInfo.m_kernelProgram.simd8;
-    else if (info->CompiledSIMDSize == 16)
-      kernelProgram = &kernel.m_kernelInfo.m_kernelProgram.simd16;
-    else if (info->CompiledSIMDSize == 32 || info->CompiledSIMDSize == 1)
-      kernelProgram = &kernel.m_kernelInfo.m_kernelProgram.simd32;
-    IGC_ASSERT(kernelProgram);
-    if (info->RelocationTable.Size > 0) {
-      kernelProgram->m_funcRelocationTable = info->RelocationTable.Buf;
-      kernelProgram->m_funcRelocationTableSize = info->RelocationTable.Size;
-      kernelProgram->m_funcRelocationTableEntries =
-          info->RelocationTable.NumEntries;
-    }
-    if (info->SymbolTable.Size > 0) {
-      kernelProgram->m_funcSymbolTable = info->SymbolTable.Buf;
-      kernelProgram->m_funcSymbolTableSize = info->SymbolTable.Size;
-      kernelProgram->m_funcSymbolTableEntries = info->SymbolTable.NumEntries;
-    }
+    IGC_ASSERT_MESSAGE(info->CompiledSIMDSize == 1, "CM code must be dispatched in SIMD1 mode");
+    IGC::SProgramOutput &kernelProgram = kernel.m_kernelInfo.m_kernelProgram.simd1;
+
+    generateSymbols(*info, kernelProgram);
+
 }
 
 // Combine cmc compiler metadata with jitter info.
@@ -482,6 +543,7 @@ static void populateKernelInfo_v2(const cmc_kernel_info_v2* info,
                                   llvm::ArrayRef<uint8_t> genBin,
                                   CMKernel& kernel)
 {
+    kernel.m_GRFSizeInBytes = info->GRFByteSize;
     // ExecutionEnivronment:
     //
     auto& kInfo = kernel.m_kernelInfo;
@@ -531,6 +593,7 @@ static void populateKernelInfo_v2(const cmc_kernel_info_v2* info,
     kernel.m_prog.m_programSize = size + padding;
     kernel.m_prog.m_unpaddedProgramSize = size;
     kernel.m_prog.m_InstructionCount = JITInfo.numAsmCount;
+
 
     // Iterate kernel arguments (This should stay in sync with cmc on resource type.)
     int numUAVs = 0;
@@ -607,4 +670,147 @@ int cmc::vISACompile_v2(cmc_compile_info_v2* output, iOpenCL::CGen8CMProgram& CM
     // build binary.
     CMProgram.CreateKernelBinaries();
     return status;
+}
+
+static void getCmcArg(cmc_arg_info& CmcArg, const vc::ocl::ArgInfo& Arg)
+{
+    switch (Arg.Kind)
+    {
+    case vc::ocl::ArgKind::General:
+        CmcArg.kind = cmc_arg_kind::General;
+        break;
+    case vc::ocl::ArgKind::LocalSize:
+        CmcArg.kind = cmc_arg_kind::LocalSize;
+        break;
+    case vc::ocl::ArgKind::GroupCount:
+        CmcArg.kind = cmc_arg_kind::GroupCount;
+        break;
+    case vc::ocl::ArgKind::Buffer:
+        CmcArg.kind = cmc_arg_kind::Buffer;
+        break;
+    case vc::ocl::ArgKind::SVM:
+        CmcArg.kind = cmc_arg_kind::SVM;
+        break;
+    case vc::ocl::ArgKind::Sampler:
+        CmcArg.kind = cmc_arg_kind::Sampler;
+        break;
+    case vc::ocl::ArgKind::Image1d:
+        CmcArg.kind = cmc_arg_kind::Image1d;
+        break;
+    case vc::ocl::ArgKind::Image2d:
+        CmcArg.kind = cmc_arg_kind::Image2d;
+        break;
+    case vc::ocl::ArgKind::Image3d:
+        CmcArg.kind = cmc_arg_kind::Image3d;
+        break;
+    case vc::ocl::ArgKind::PrintBuffer:
+        CmcArg.kind = cmc_arg_kind::PrintBuffer;
+        break;
+    case vc::ocl::ArgKind::PrivateBase:
+        CmcArg.kind = cmc_arg_kind::PrivateBase;
+        break;
+    }
+
+    switch (Arg.AccessKind)
+    {
+    case vc::ocl::ArgAccessKind::None:
+        CmcArg.access = cmc_access_kind::undef;
+        break;
+    case vc::ocl::ArgAccessKind::ReadOnly:
+        CmcArg.access = cmc_access_kind::read_only;
+        break;
+    case vc::ocl::ArgAccessKind::WriteOnly:
+        CmcArg.access = cmc_access_kind::write_only;
+        break;
+    case vc::ocl::ArgAccessKind::ReadWrite:
+        CmcArg.access = cmc_access_kind::read_write;
+        break;
+    }
+
+    CmcArg.index = Arg.Index;
+    CmcArg.offset = Arg.Offset;
+    CmcArg.sizeInBytes = Arg.SizeInBytes;
+    CmcArg.BTI = Arg.BTI;
+}
+
+// Returns vector of cmc_arg_info with all fields initialized.
+static std::vector<cmc_arg_info> getCmcArgInfos(const std::vector<vc::ocl::ArgInfo>& Args)
+{
+    std::vector<cmc_arg_info> CmcArgs{Args.size()};
+    for (unsigned i = 0, e = Args.size(); i != e; ++i)
+        getCmcArg(CmcArgs[i], Args[i]);
+    return CmcArgs;
+}
+
+static std::vector<cmc_ocl_print_string> getCmcPrintStrings(
+    const std::vector<std::string>& Original)
+{
+    std::vector<cmc_ocl_print_string> Converted;
+    std::transform(Original.begin(), Original.end(), std::back_inserter(Converted),
+        [](const std::string &str) {
+            IGC_ASSERT_MESSAGE(str.size() < cmc_ocl_print_string::max_width, "illegal string length");
+            cmc_ocl_print_string Tmp;
+            strcpy_s(Tmp.s, cmc_ocl_print_string::max_width, str.c_str());
+            return Tmp;
+        });
+    return Converted;
+}
+
+struct CmcContext
+{
+    std::vector<cmc_arg_info> Args;
+    std::vector<cmc_ocl_print_string> PrintStrings;
+};
+
+// Fills non-owning cmc_kernel_info with all fields initialized.
+static void getCmcKernelInfo(
+    cmc_kernel_info_v2& CmcInfo,
+    const vc::ocl::KernelInfo& Info,
+    const FINALIZER_INFO& JitInfo,
+    CmcContext& CmcCtx)
+{
+    IGC_ASSERT_MESSAGE(CmcCtx.PrintStrings.size() == Info.PrintStrings.size(), "inconsistent arguments");
+    CmcInfo.name = Info.Name.c_str();
+    CmcInfo.num_args = CmcCtx.Args.size();
+    CmcInfo.arg_descs = CmcCtx.Args.data();
+    CmcInfo.HasLocalIDx = true;
+    CmcInfo.HasLocalIDy = true;
+    CmcInfo.HasLocalIDz = true;
+    CmcInfo.HasGroupID = Info.HasGroupID;
+    CmcInfo.CompiledSIMDSize = 1;
+    CmcInfo.SLMSize = Info.SLMSize;
+    CmcInfo.NumGRFRequired = JitInfo.numGRFTotal;
+    CmcInfo.GRFByteSize = Info.GRFSizeInBytes;
+    CmcInfo.HasBarriers = Info.HasBarriers;
+    CmcInfo.StatelessPrivateMemSize = Info.StatelessPrivateMemSize;
+    CmcInfo.HasReadWriteImages = Info.HasReadWriteImages;
+    CmcInfo.num_print_strings = CmcCtx.PrintStrings.size();
+    CmcInfo.print_string_descs = CmcCtx.PrintStrings.data();
+    // std::copy requires either reinteprets or implementation of operator= in
+    // TableInfos from independent headers so memcpy seems to be the best option
+    // for now
+    memcpy_s(&CmcInfo.RelocationTable, sizeof(Info.RelocationTable), &Info.RelocationTable,
+           sizeof(Info.RelocationTable));
+    memcpy_s(&CmcInfo.SymbolTable, sizeof(Info.SymbolTable), &Info.SymbolTable,
+           sizeof(Info.SymbolTable));
+}
+
+void vc::createBinary(
+    iOpenCL::CGen8CMProgram& CMProgram,
+    const std::vector<vc::ocl::CompileInfo>& CompileInfos)
+{
+    cmc_kernel_info_v2 CmcInfo;
+    CmcContext CmcCtx;
+    for (const vc::ocl::CompileInfo& Info : CompileInfos)
+    {
+        CmcCtx.Args = getCmcArgInfos(Info.KernelInfo.Args);
+        CmcCtx.PrintStrings = getCmcPrintStrings(Info.KernelInfo.PrintStrings);
+        getCmcKernelInfo(CmcInfo, Info.KernelInfo, Info.JitInfo, CmcCtx);
+        CMKernel* K = new CMKernel(CMProgram.getPlatform());
+        CMProgram.m_kernels.push_back(K);
+        llvm::ArrayRef<uint8_t> GenBin{
+            reinterpret_cast<const uint8_t*>(Info.GenBinary.data()),
+            Info.GenBinary.size()};
+        populateKernelInfo_v2(&CmcInfo, Info.JitInfo, GenBin, *K);
+    }
 }

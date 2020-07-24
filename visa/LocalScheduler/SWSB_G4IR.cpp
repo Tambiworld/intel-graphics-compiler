@@ -1532,12 +1532,12 @@ void SWSB::tokenDepReduction(SBNode* n1, SBNode* n2)
             //BB:
             //     node2
             //     succ(node1)
-            if ((node1BBID == node2BBID && bbID1 != node2BBID) ||
-                (node1BBID != node2BBID && bbID1 == node2BBID && succ1->getNodeID() > node2->getNodeID()))
-            {
-                node_it = node1->succs.erase(node_it);//FIXME, if the succ is the token instruction, do we need free the tokens assigned to the instruction because of the dependence
-                continue;
-            }
+            //if ((node1BBID == node2BBID && bbID1 != node2BBID) ||
+            //    (node1BBID != node2BBID && bbID1 == node2BBID && succ1->getNodeID() > node2->getNodeID()))
+            //{
+            //    node_it = node1->succs.erase(node_it);//FIXME, if the succ is the token instruction, do we need free the tokens assigned to the instruction because of the dependence
+            //    continue;
+            //}
 
             //When two sucessors are in same BB, previous one kill the following one
             // FIXME: This may not be good, because the policy is trying to keep the longest dependence and move the short one
@@ -2154,7 +2154,7 @@ bool SWSB::propogateDist(G4_BB* bb)
                 BBVector[bbID]->send_live_out->isDstSet(i) &&
                 !BBVector[bbID]->send_may_kill->isDstSet(i))
             {
-                BBVector[bbID]->tokenLiveOutDist[i] = BBVector[bbID]->tokenLiveInDist[i] + bb->getInstList().size();
+                BBVector[bbID]->tokenLiveOutDist[i] = BBVector[bbID]->tokenLiveInDist[i] + bb->size();
             }
         }
     }
@@ -3067,7 +3067,7 @@ G4_INST* SWSB::insertSyncInstruction(G4_BB* bb, INST_LIST_ITER nextIter, int CIS
 {
     G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
     G4_INST* syncInst = fg.builder->createSync(G4_sync_nop, src0);
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
     syncInstCount++;
 
     return syncInst;
@@ -3079,7 +3079,7 @@ G4_INST* SWSB::insertSyncInstructionAfter(G4_BB* bb, INST_LIST_ITER iter, int CI
     nextIter++;
     G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
     G4_INST* syncInst = fg.builder->createSync(G4_sync_nop, src0);
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
     syncInstCount++;
 
     return syncInst;
@@ -3088,7 +3088,7 @@ G4_INST* SWSB::insertSyncInstructionAfter(G4_BB* bb, INST_LIST_ITER iter, int CI
 G4_INST* SWSB::insertTestInstruction(G4_BB* bb, INST_LIST_ITER nextIter, int CISAOff, int lineNo, bool countSync)
 {
     G4_INST* nopInst = fg.builder->createNop(InstOpt_NoOpt);
-    bb->insert(nextIter, nopInst);
+    bb->insertBefore(nextIter, nopInst);
     if (countSync)
     {
         syncInstCount++;
@@ -3112,7 +3112,7 @@ G4_INST* SWSB::insertSyncAllRDInstruction(G4_BB* bb, unsigned int SBIDs, INST_LI
         syncInst = fg.builder->createSync(G4_sync_allrd, src0);
         ARSyncAllCount++;
     }
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
 
     return syncInst;
 }
@@ -3132,7 +3132,7 @@ G4_INST* SWSB::insertSyncAllWRInstruction(G4_BB* bb, unsigned int SBIDs, INST_LI
         syncInst = fg.builder->createSync(G4_sync_allwr, src0);
         AWSyncAllCount++;
     }
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
 
     return syncInst;
 }
@@ -3312,7 +3312,7 @@ void SWSB::insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER ins
     {
         INST_LIST_ITER nextIt = inst_it;
         nextIt++;
-        if (nextIt != bb->getInstList().end())
+        if (nextIt != bb->end())
         {
             G4_INST *nextInst = *nextIt;
             if (tokenHonourInstruction(nextInst) ||
@@ -4610,7 +4610,6 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
 
                 if (!hasOverlap &&
                     dep == RAW &&
-                    (liveNode->getNodeID() + 1) == node->getNodeID() && //Adjacent nodes
                     liveInst->isMath() &&
                     (!hasSamePredicator(liveInst, curInst)))
                 {
@@ -6054,9 +6053,14 @@ void vISA::forceDebugSWSB(G4_Kernel* kernel)
                 {
                     INST_LIST_ITER new_it = inst_it;
                     new_it++;
-                    bb->insert(new_it, newInst);
+                    bb->insertBefore(new_it, newInst);
                     newInst->setLexicalId(instID);
                     instID++;
+                    if (new_it == bb->end())
+                    {
+                        break;
+                    }
+                    inst_it++;
                 }
             }
         }
@@ -6102,7 +6106,7 @@ static void setInstructionStallSWSB(IR_Builder* builder,
             tokenType = SWSBTokenType::AFTER_WRITE;
         }
         syncInst->setDepToken(token, tokenType);
-        inst_it = bb->insert(next_it, syncInst);
+        inst_it = bb->insertBefore(next_it, syncInst);
     }
 
     return;
@@ -6119,7 +6123,7 @@ static void setInstructionBarrierSWSB(IR_Builder* builder,
     syncAllRdInst->setDistance(1);
     INST_LIST_ITER next_it = inst_it;
     next_it++;
-    inst_it = bb->insert(next_it, syncAllRdInst);
+    inst_it = bb->insertBefore(next_it, syncAllRdInst);
 
     G4_INST* syncAllWrInst = nullptr;
     src0 = builder->createNullSrc(Type_UD);
@@ -6127,7 +6131,7 @@ static void setInstructionBarrierSWSB(IR_Builder* builder,
 
     next_it = inst_it;
     next_it++;
-    inst_it = bb->insert(next_it, syncAllWrInst);
+    inst_it = bb->insertBefore(next_it, syncAllWrInst);
 }
 
 

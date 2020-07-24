@@ -48,6 +48,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "AdaptorCommon/AddImplicitArgs.hpp"
 #include "AdaptorCommon/ProcessFuncAttributes.h"
+#include "AdaptorCommon/LegalizeFunctionSignatures.h"
 #include "common/LLVMUtils.h"
 
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
@@ -85,7 +86,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/AggregateArguments/AggregateArguments.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/UnreachableHandling/UnreachableHandling.hpp"
 #include "Compiler/Optimizer/OCLBIConverter.h"
 #include "Compiler/Optimizer/OpenCLPasses/SetFastMathFlags/SetFastMathFlags.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/CorrectlyRoundedDivSqrt/CorrectlyRoundedDivSqrt.hpp"
@@ -253,7 +253,8 @@ static void CommonOCLBasedPasses(
         pContext->m_InternalOptions.IntelHasBufferOffsetArg;
 
     CompilerOpts.PreferBindlessImages =
-        pContext->m_InternalOptions.PreferBindlessImages;
+        pContext->m_InternalOptions.PreferBindlessImages ||
+        pContext->m_InternalOptions.UseBindlessMode;
 
     if (CompilerOpts.PreferBindlessImages) {
         pContext->getModuleMetaData()->UseBindlessImage = true;
@@ -285,8 +286,6 @@ static void CommonOCLBasedPasses(
     mpm.add(new ClampLoopUnroll(256));
 
     mpm.add(new MoveStaticAllocas());
-
-    mpm.add(new UnreachableHandling());
 
     // Skip this pass if OCL version < 2.0
     if (!(OCLMajor < 2))
@@ -357,6 +356,16 @@ static void CommonOCLBasedPasses(
             mpm.add(createProcessBuiltinMetaDataPass());
         }
         mpm.add(new PurgeMetaDataUtils());
+    }
+
+    // Fix illegal argument/return types in function calls not already inlined.
+    // Structs/arrays are not allowed to be passed by value.
+    // Return types are not allowed to be more than 64-bits.
+    // This pass changes all illegal function signatures to be passed by pointer instead.
+    // NOTE: SPIR-V adaptor already handles this for struct types
+    if (pContext->m_instrTypes.hasSubroutines)
+    {
+        mpm.add(new LegalizeFunctionSignatures());
     }
 
     // OpenCL WI + image function resolution

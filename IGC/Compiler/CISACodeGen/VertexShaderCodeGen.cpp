@@ -164,7 +164,9 @@ namespace IGC
         IGC_ASSERT(entry->getParent());
         const bool isPositionOnlyShader = (entry->getParent()->getModuleFlag("IGC::PositionOnlyVertexShader") != nullptr);
 
-        pKernelProgram->simd8 = *ProgramOutput();
+        {
+            pKernelProgram->simd8 = *ProgramOutput();
+        }
         pKernelProgram->MaxNumInputRegister = GetMaxNumInputRegister();
         pKernelProgram->VertexURBEntryReadLength = GetVertexURBEntryReadLength();
         pKernelProgram->VertexURBEntryReadOffset = GetVertexURBEntryReadOffset();
@@ -229,8 +231,6 @@ namespace IGC
         CreateImplicitArgs();
         m_R1 = GetNewVariable(
             numLanes(m_Platform->getMinDispatchMode()), ISA_TYPE_D, EALIGN_GRF, "R1");
-        m_pURBWriteHandleReg = m_R1;
-
     }
 
     void CVertexShader::AddPrologue()
@@ -239,7 +239,7 @@ namespace IGC
 
     CVariable* CVertexShader::GetURBOutputHandle()
     {
-        return m_pURBWriteHandleReg;
+        return m_R1;
     }
 
     CVariable* CVertexShader::GetURBInputHandle(CVariable* pVertexIndex)

@@ -125,6 +125,7 @@ namespace IGC
         bool      m_noMask;
         bool      m_SubSpanDestination;
         bool      m_secondHalf;
+        bool      m_secondNibble = false;
     };
 
     class CEncoder
@@ -135,6 +136,7 @@ namespace IGC
         void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
         void SetEncoderState(SEncoderState& newState);
+        VISA_Align GetVISAAlign(CVariable* var);
 
         void SetDispatchSimdSize();
         void SetSpillMemOffset();
@@ -352,6 +354,8 @@ namespace IGC
         inline bool IsSubSpanDestination();
         inline void SetSecondHalf(bool secondHalf);
         inline bool IsSecondHalf();
+        inline void SetSecondNibble(bool secondNibble);
+        inline bool IsSecondNibble();
 
         void Wait();
 
@@ -482,9 +486,21 @@ namespace IGC
         bool AvoidRetryOnSmallSpill() const;
 
         // CreateSymbolTable, CreateRelocationTable and CreateFuncAttributeTable will create symbols, relococations and FuncAttributes in
-        // two format. One in given buffer that will be later parsed as patch token based format, another as struct type that will be parsed
+        // two formats. One in given buffer that will be later parsed as patch token based format, another as struct type that will be parsed
         // as ZE binary format
+
+        // CreateSymbolTable
+        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        // input/output: symbols: for ZEBinary foramt
+        // FIXME: Currently we will fill both structures for patch-token-based and ZEBinary format. Can refactor the code
+        // to do only one based on produced binary format (regkey: EnableZEBinary)
         void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::SymbolLists& symbols);
+        // Create function symbols for kernels. This is ZEBinary foramt only.
+        void CreateKernelSymbol(const std::string& kernelName, const VISAKernel& visaKernel, SProgramOutput::SymbolLists& symbols);
+
+        // CreateRelocationTable
+        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        // input/output: relocations: for ZEBinary foramt
         void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::RelocListTy& relocations);
         void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs);
 
@@ -922,6 +938,16 @@ namespace IGC
     inline bool CEncoder::IsSecondHalf()
     {
         return m_encoderState.m_secondHalf;
+    }
+
+    inline void CEncoder::SetSecondNibble(bool secondNibble)
+    {
+        m_encoderState.m_secondNibble = secondNibble;
+    }
+
+    inline bool CEncoder::IsSecondNibble()
+    {
+        return m_encoderState.m_secondNibble;
     }
 
     inline bool CEncoder::IsSubSpanDestination()

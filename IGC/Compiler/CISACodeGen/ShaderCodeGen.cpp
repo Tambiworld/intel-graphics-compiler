@@ -110,7 +110,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
-#include "Compiler/FindInterestingConstants.h"
 #include "Compiler/DynamicTextureFolding.h"
 #include "Compiler/SampleMultiversioning.hpp"
 #include "Compiler/ThreadCombining.hpp"
@@ -799,23 +798,26 @@ static void PSCodeGen(
 
     // for versioned loop, in general SIMD16 with spill has better perf
     bool earlyExit16 = psInfo.hasVersionedLoop ? false : earlyExit;
-    bool enableSimd32 = false;
+    bool enableHigherSimd = false;
 
     if (psInfo.ForceEnableSimd32) // UMD forced compilation of simd32.
     {
-        enableSimd32 = true;
+        enableHigherSimd = true;
     }
     // heuristic based on performance measures.
     else if (SimdEarlyCheck(ctx))
     {
-        enableSimd32 = true;
+        enableHigherSimd = true;
     }
 
     if (IGC_IS_FLAG_ENABLED(ForceBestSIMD))
     {
-        if (enableSimd32)
+        if (enableHigherSimd)
         {
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, true, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        } else
+        {
+            ctx->SetSIMDInfo(SIMD_SKIP_SPILL, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
         }
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
@@ -823,9 +825,12 @@ static void PSCodeGen(
     else if (IsStage1BestPerf(ctx->m_CgFlag, ctx->m_StagingCtx))
     {
         // don't retry SIMD16 for ForcePSBestSIMD
-        if (enableSimd32 || IGC_GET_FLAG_VALUE(SkipTREarlyExitCheck))
+        if (enableHigherSimd || IGC_GET_FLAG_VALUE(SkipTREarlyExitCheck))
         {
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, earlyExit16, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        }
+        else {
+            ctx->SetSIMDInfo(SIMD_SKIP_SPILL, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
         }
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
@@ -865,10 +870,15 @@ static void PSCodeGen(
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
 
-        if (enableSimd32 || IGC_GET_FLAG_VALUE(SkipTREarlyExitCheck))
+        if (enableHigherSimd || IGC_GET_FLAG_VALUE(SkipTREarlyExitCheck))
         {
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, earlyExit16, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, earlyExit, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        }
+        else
+        {
+            ctx->SetSIMDInfo(SIMD_SKIP_SPILL, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
+            ctx->SetSIMDInfo(SIMD_SKIP_SPILL, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
         }
     }
 
@@ -947,6 +957,10 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
                     allowSpill = true;
                 }
             }
+            else {
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
+            }
 
             // if simd16 has better thread occupancy, then allows spills
             unsigned tempThreshold16 = allowSpill
@@ -964,6 +978,8 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
                 AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8,
                     !ctx->m_retryManager.IsLastTry());
                 setEarlyExit16Stat = true;
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
             }
             else
             {
@@ -972,9 +988,13 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
                 // allow simd16 spill if having SLM
                 if (cgSimd16)
                     AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, earlyExit);
+                else
+                    ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
 
                 if (cgSimd32)
                     AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, true);
+                else
+                    ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
 
                 AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8,
                     !ctx->m_retryManager.IsLastTry());
@@ -990,6 +1010,10 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
             {
                 AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, true);
             }
+            else {
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
+            }
+            ctx->SetSIMDInfo(SIMD_SKIP_HW, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
             break;
         }
 
@@ -997,6 +1021,8 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
         {
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32,
                 !ctx->m_retryManager.IsLastTry());
+            ctx->SetSIMDInfo(SIMD_SKIP_HW, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
+            ctx->SetSIMDInfo(SIMD_SKIP_HW, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
             break;
         }
 
@@ -1318,7 +1344,7 @@ void OptimizeIR(CodeGenContext* const pContext)
     if (false == pContext->m_hasLegacyDebugInfo)
     {
         IGC_ASSERT(nullptr != pContext->getModule());
-        // IGC_ASSERT(false == llvm::verifyModule(*pContext->getModule()));
+        IGC_ASSERT(false == llvm::verifyModule(*pContext->getModule()));
     }
 
     COMPILER_TIME_START(pContext, TIME_OptimizationPasses);
@@ -1412,7 +1438,7 @@ void OptimizeIR(CodeGenContext* const pContext)
         }
 
         mpm.add(new BreakConstantExpr());
-        mpm.add(new IGCConstProp(!pContext->m_DriverInfo.SupportsPreciseMath()));
+        mpm.add(new IGCConstProp());
 
         mpm.add(new CustomSafeOptPass());
         if (!pContext->m_DriverInfo.WADisableCustomPass())
@@ -1457,8 +1483,10 @@ void OptimizeIR(CodeGenContext* const pContext)
 
                 if (pContext->m_retryManager.AllowLICM() && IGC_IS_FLAG_ENABLED(allowLICM))
                 {
+                    int licmTh = IGC_GET_FLAG_VALUE(LICMStatThreshold);
+                    mpm.add(new InstrStatistic(pContext, LICM_STAT, InstrStatStage::BEGIN, licmTh));
                     mpm.add(llvm::createLICMPass());
-                    mpm.add(llvm::createLICMPass());
+                    mpm.add(new InstrStatistic(pContext, LICM_STAT, InstrStatStage::END, licmTh));
                 }
 
                 mpm.add(CreateHoistFMulInLoopPass());
@@ -1515,9 +1543,9 @@ void OptimizeIR(CodeGenContext* const pContext)
                 {
                         if (pContext->m_DriverInfo.NeedCountSROA())
                     {
-                        mpm.add(new InstrStatitic(pContext, SROA_PROMOTED, InstrStatStage::BEGIN, 300));
+                        mpm.add(new InstrStatistic(pContext, SROA_PROMOTED, InstrStatStage::BEGIN, 300));
                         mpm.add(createSROAPass());
-                        mpm.add(new InstrStatitic(pContext, SROA_PROMOTED, InstrStatStage::END, 300));
+                        mpm.add(new InstrStatistic(pContext, SROA_PROMOTED, InstrStatStage::END, 300));
                     }
                     else
                     {
@@ -1550,8 +1578,7 @@ void OptimizeIR(CodeGenContext* const pContext)
                 mpm.add(llvm::createAggressiveDCEPass());
 
             mpm.add(new BreakConstantExpr());
-            mpm.add(new IGCConstProp(!pContext->m_DriverInfo.SupportsPreciseMath(),
-                IGC_IS_FLAG_ENABLED(EnableSimplifyGEP)));
+            mpm.add(new IGCConstProp(IGC_IS_FLAG_ENABLED(EnableSimplifyGEP)));
 
             if (IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
             {
@@ -1702,12 +1729,6 @@ void OptimizeIR(CodeGenContext* const pContext)
         if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
         {
             mpm.add(new PurgeMetaDataUtils());
-        }
-
-        if (!IGC_IS_FLAG_ENABLED(DisableDynamicConstantFolding) &&
-            pContext->getModuleMetaData()->inlineDynConstants.empty())
-        {
-            mpm.add(new FindInterestingConstants());
         }
         // mpm.add(llvm::createDeadCodeEliminationPass()); // this should be done both before/after constant propagation
 
